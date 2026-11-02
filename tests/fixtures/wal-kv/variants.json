@@ -1,0 +1,17 @@
+{
+  "package": "walkv",
+  "buggy": {
+    "edits": [
+      {"file": "walkv/store.py",
+       "find": "            raise TransactionError(\"no open transaction\")\n        self._layers.pop()\n",
+       "replace": "            raise TransactionError(\"no open transaction\")\n        self._layers.clear()\n"},
+      {"file": "walkv/store.py",
+       "find": "return default if entry is _DELETED else json.loads(entry[0])",
+       "replace": "return default if entry is _DELETED else (json.loads(entry[0]) or default)"},
+      {"file": "walkv/store.py",
+       "find": "if index != len(lines) - 1:", "replace": "if False:"}
+    ],
+    "must_fail": ["test_hidden.test_nested_rollback_only_undoes_inner", "test_hidden.test_falsy_values_are_returned[0]",
+                  "test_hidden.test_damage_in_the_middle_raises_and_keeps_file"]
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "package": "cronnext",
+  "buggy": {
+    "edits": [
+      {
+        "file": "cronnext/core.py",
+        "find": "return dom or dow",
+        "replace": "return dom and dow"
+      }
+    ],
+    "must_fail": [
+      "test_hidden.test_dom_and_dow_both_restricted_is_or",
+      "test_hidden.test_or_rule_respects_month"
+    ]
+  },
+  "loop": {
+    "edits": [
+      {
+        "file": "cronnext/core.py",
+        "find": "    return _next_from(schedule, when)\n",
+        "replace": "    result = _next_from(schedule, when)\n    while result is None and schedule.months == {2}:\n        pass\n    return result\n"
+      }
+    ],
+    "must_fail": [
+      "test_hidden.test_impossible_date_returns_none[0 0 31 2 *]"
+    ]
+  },
+  "isdigit": {
+    "edits": [
+      {
+        "file": "cronnext/__main__.py",
+        "find": "if not (value.isascii() and value.isdigit()):",
+        "replace": "if not value.isdigit():"
+      },
+      {
+        "file": "cronnext/core.py",
+        "find": "(?:/([0-9]+))?$",
+        "replace": "(?:/(\\d+))?$"
+      }
+    ],
+    "must_fail": [
+      "test_hidden.test_invalid_expressions[*/\\u0663 * * * *]",
+      "test_hidden.test_cli_errors_go_to_stderr_with_code_2[args6]"
+    ]
+  }
+}

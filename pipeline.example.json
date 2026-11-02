@@ -1,0 +1,60 @@
+{
+  "task": "toy-bepay",
+  "tasks_dir": "tasks",
+  "runs_dir": "runs",
+  "logs_dir": "logs",
+  "results_dir": "results",
+
+  "backend": {
+    "type": "lmstudio",
+    "url": "http://127.0.0.1:1234",
+    "api_key_env": "",
+    "context_length": 65536,
+    "gpu": "max"
+  },
+
+  "proxy_port": 1235,
+  "served_model_name": "local-model",
+  "test_timeout_s": 600,
+
+  "planner": {
+    "label": "planner-model",
+    "model": "PASTE-MODEL-KEY-HERE"
+  },
+
+  "builders": [
+    {
+      "label": "builder-one",
+      "model": "PASTE-MODEL-KEY-HERE"
+    },
+    {
+      "label": "builder-two",
+      "model": "PASTE-MODEL-KEY-HERE"
+    }
+  ],
+
+  "reviewers": [
+    {
+      "label": "reviewer-model",
+      "model": "PASTE-MODEL-KEY-HERE"
+    }
+  ],
+
+  "judges": [
+    {
+      "label": "web-chat-judge",
+      "type": "paste"
+    },
+    {
+      "label": "api-judge",
+      "type": "api",
+      "base_url": "https://api.example.com/v1",
+      "model": "PASTE-MODEL-KEY-HERE",
+      "api_key_env": "JUDGE_API_KEY"
+    },
+    {
+      "label": "human-judge",
+      "type": "human"
+    }
+  ]
+}

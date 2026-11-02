@@ -1,0 +1,23 @@
+# Local configuration (copy pipeline.example.json or run `init`)
+pipeline.json
+
+# Everything a run produces. Reports name the models you tested.
+runs/
+logs/
+results/
+
+# Archives
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

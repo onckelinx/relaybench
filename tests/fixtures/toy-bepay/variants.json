@@ -1,0 +1,29 @@
+{
+  "package": "bepay",
+  "buggy": {
+    "edits": [
+      {
+        "file": "bepay/validators.py",
+        "find": "return base % 97 or 97",
+        "replace": "return base % 97"
+      }
+    ],
+    "must_fail": [
+      "TestOgmValidation.test_check_97_when_remainder_zero",
+      "TestMakeOgm.test_lower_bound"
+    ]
+  },
+  "isdigit": {
+    "edits": [
+      {
+        "file": "bepay/validators.py",
+        "find": "    match = _OGM.fullmatch(text.strip())\n",
+        "replace": "    plain = text.strip()\n    if len(plain) == 12 and plain.isdigit():\n        return _check(int(plain[:10])) == int(plain[10:])\n    match = _OGM.fullmatch(plain)\n"
+      }
+    ],
+    "must_fail": [
+      "TestOgmValidation.test_non_ascii_digits_are_invalid",
+      "TestCli.test_non_ascii_digits_print_invalid"
+    ]
+  }
+}
