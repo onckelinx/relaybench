@@ -12,7 +12,7 @@ active through <logs_dir>/current-stage.json.
 A person normally drives the agent, stage by stage, with `next`. With a
 command-line agent in the config, `run` does the whole run unattended.
 
-Run `python pipeline.py help` for the list of commands, or see GUIDE.md.
+Run `python pipeline.py help` for the list of commands, or see GUIDE-MANUAL.md and GUIDE-UNATTENDED.md.
 The harness is standard library only (Python 3.9+); hidden tests need pytest.
 """
 import argparse
@@ -25,6 +25,7 @@ import os
 import platform
 import random
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -288,6 +289,14 @@ def http_json(url, payload=None, timeout=10, headers=None):
     req = urllib.request.Request(url, data=data, headers=all_headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+def server_problem(cfg, exc):
+    """Why the server can't be used. A rejected certificate isn't the same as a server that is down."""
+    if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+        return ("The model server at %s has a certificate this Python doesn't trust: %s"
+                % (backend_root(cfg), exc))
+    return "The model server is not reachable at %s." % backend_root(cfg)
 
 
 def loaded_model_ids(cfg):
@@ -573,8 +582,8 @@ def ensure_loaded(cfg, source, label):
         die("The model key for '%s' is still a placeholder in pipeline.json." % label)
     try:
         ids = loaded_model_ids(cfg)
-    except (urllib.error.URLError, OSError, ValueError):
-        die("The model server is not reachable at %s. Start it first." % backend_root(cfg))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        die(server_problem(cfg, exc) + " Fix that first.")
     if not uses_alias(cfg):
         if backend_of(cfg).get("type", "lmstudio") == "lmstudio":
             warn("LM Studio's 'lms' command was not found, so the harness can't set the context length. "
@@ -885,7 +894,7 @@ def cmd_check(cfg, _args):
             ok("LM Studio CLI: " + lms_bin())
         else:
             warn("LM Studio CLI 'lms' not found. Models can't be loaded with a set context length "
-                 "(see 'Backends' in GUIDE.md)")
+                 "(see 'Backends' in GUIDE-MANUAL.md)")
 
     missing = [m["label"] for m in all_models(cfg) if not m.get("model") or m["model"] == PLACEHOLDER]
     if missing:
@@ -912,8 +921,8 @@ def cmd_check(cfg, _args):
                     fail("Not offered by the server: %s (%s). Compare with:  %s models"
                          % (model["label"], model["model"], CMD))
                     problems += 1
-    except (urllib.error.URLError, OSError, ValueError):
-        fail("The model server is not reachable at %s" % backend_root(cfg))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        fail(server_problem(cfg, exc))
         problems += 1
 
     try:
@@ -1830,7 +1839,7 @@ def cmd_report(cfg, _args):
              "- Task: `%s`" % run["task"],
              "- Started: %s" % run["created"],
              "- Platform: %s, Python %s" % (run.get("platform", "?"), run.get("python", "?")),
-             "- Mode: %s" % ("unattended, with `%s`" % " ".join((run.get("agent") or {}).get("command", ["?"]))
+             "- Mode: %s" % ("unattended, with `%s`" % shlex.join((run.get("agent") or {}).get("command", ["?"]))
                              if results else "manual"),
              "- Backend: %s" % run.get("backend", {}).get("type", "?"),
              "- Context length: %s" % context_text,
@@ -1866,9 +1875,10 @@ def cmd_report(cfg, _args):
                 _f(_median([r.get("ttft_s") for r in recs])),
                 _f(gen_out / gen_time if gen_time > 0 else None),
                 _f(model_time / 60), _f(wall / 60)))
+        included = "tool use and any gap between attempts" if results else \
+            "tool use, your approvals and any gap between attempts"
         lines += ["", "*Model time* = time spent waiting for the model. "
-                      "*Wall time* = first to last model call in that stage (includes tool use and your approvals, "
-                      "and any gap between attempts)."]
+                      "*Wall time* = first to last model call in that stage (includes %s)." % included]
         if any_estimate:
             lines += ["", "`~` = the server sent no token counts for some calls, so those are counted in stream "
                           "chunks. Speeds for such stages are estimates; don't compare them across servers."]
@@ -1878,6 +1888,7 @@ def cmd_report(cfg, _args):
             recs = by_stage[stage]
             lines.append("| %s | %s | %s |" % (stage_name(stage), _distinct(r.get("temperature") for r in recs),
                                                _distinct(r.get("max_tokens") for r in recs)))
+        lines += ["", "`–` = the agent didn't send this setting, so the server's or the model's default applied."]
     else:
         lines.append("No proxy log entries for this run. Was the proxy running, and was each stage "
                      "started with '%s next'?" % CMD)
@@ -2067,14 +2078,14 @@ def _keep_awake():
     else:
         tool = None
     if not tool:
-        warn("Can't keep this machine awake from here. See 'Long and unattended runs' in GUIDE.md.")
+        warn("Can't keep this machine awake from here. See 'Keeping the machine awake' in GUIDE-UNATTENDED.md.")
         return None
     kwargs = {"start_new_session": True} if os.name != "nt" else {}
     holder = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, **kwargs)
     time.sleep(0.3)
     if holder.poll() is not None:
-        warn("%s could not keep this machine awake. See 'Long and unattended runs' in GUIDE.md."
+        warn("%s could not keep this machine awake. See 'Keeping the machine awake' in GUIDE-UNATTENDED.md."
              % os.path.basename(tool))
         return None
     ok("Keeping the machine awake during this run (%s)" % os.path.basename(tool))
@@ -2290,8 +2301,8 @@ def _run_preflight(cfg, agent, source):
         die("The agent command '%s' was not found." % agent["command"][0])
     try:
         loaded_model_ids(cfg)
-    except (urllib.error.URLError, OSError, ValueError):
-        die("The model server is not reachable at %s. Start it first." % backend_root(cfg))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        die(server_problem(cfg, exc) + " Fix that first.")
     offered = list_models(backend_of(cfg).get("type", "lmstudio"), backend_root(cfg), served_name(cfg),
                           backend_headers(cfg))
     for model in all_models(source):
@@ -2397,7 +2408,7 @@ def cmd_run(cfg, args):
         agent = run_config.get("agent") or agent
     if not agent:
         die("Unattended runs need a command-line agent in pipeline.json, for example:\n%s\n"
-            "See 'Unattended runs' in GUIDE.md." % AGENT_EXAMPLE)
+            "See GUIDE-UNATTENDED.md." % AGENT_EXAMPLE)
     _run_preflight(cfg, agent, run_config)
 
     UNATTENDED = True

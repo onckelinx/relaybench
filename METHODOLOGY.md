@@ -88,7 +88,7 @@ in a run, and judges get the results as strong evidence for correctness.
   variants that must fail specific tests. Those checks are in `tests/test_e2e.py`.
 
 Tests only check what they check. A build can pass by accident or fail on an ambiguous reading of the
-task. That is why judges are told to read the code too. In a [real run](examples/), both judges found
+task. That is why judges are told to read the code too. In an [earlier real run](https://github.com/onckelinx/relaybench/blob/86a38bb/examples/REPORT.md), both judges found
 a crash in a build that had passed every hidden test, and the tests were extended afterwards.
 
 ## Metrics via proxy

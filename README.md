@@ -11,7 +11,7 @@
 
 *One real run of the toy task on a MacBook Pro (M5 Max, 128 GB unified memory), from a pre-release
 version of the harness. It shows what a report looks like; one run isn't a ranking of these models.
-[Full report and caveats](examples/).*
+[That run's full report](https://github.com/onckelinx/relaybench/blob/86a38bb/examples/REPORT.md). A newer real report and its caveats are in [examples/](examples/).*
 
 **Test local coding models the way you would actually use them: as a relay.**
 
@@ -40,9 +40,24 @@ relaybench gives each model one role and holds everything else constant, so the 
 comparable. [METHODOLOGY.md](METHODOLOGY.md) explains the design and, just as important, its limits.
 
 It tests models *through an agent you already use*. It is not an agent. You open each stage's folder
-in your coding agent (the [guide](GUIDE.md) uses Cline as its example) and tell it to follow the
-instructions there. Any agent that can talk to an OpenAI-compatible URL works. If yours has a
+in your coding agent (the [manual guide](GUIDE-MANUAL.md) uses Cline as its example) and tell it to follow
+the instructions there. Any agent that can talk to an OpenAI-compatible URL works. If yours has a
 command-line mode, [`run`](#unattended-runs) can do the whole run for you.
+
+## Which guide do I need?
+
+There are two ways to run it, and each has its own step-by-step guide.
+
+| | Manual | Unattended |
+|---|---|---|
+| **What you do** | Drive the agent through each stage in your editor | Start one command and walk away |
+| **You need** | An editor agent, such as Cline in VS Code | A command-line agent, such as Cline's CLI |
+| **Over SSH** | Needs a remote editor session | Yes, with `tmux` |
+| **Who approves commands** | You, or your agent's settings | Nobody |
+| **Status** | Used with real models, on an earlier version | One real toy run so far, with Cline's CLI on macOS |
+| **Guide** | [GUIDE-MANUAL.md](GUIDE-MANUAL.md) | [GUIDE-UNATTENDED.md](GUIDE-UNATTENDED.md) |
+
+The quickstart below is the short version of the manual way.
 
 ## 5-minute quickstart
 
@@ -113,10 +128,12 @@ report, and the rest of the run carries on.
 - **The plan isn't read by a person** before it is frozen.
 - **Scores from different agents don't compare directly**, so compare runs made the same way. The report
   records the mode and the agent command. Keep API keys out of the command, since the report shows it.
-- **Status:** tested with a scripted stand-in only, **not yet with a real agent or real model**.
+- **Status:** one real run so far: the toy task with Cline's CLI 3.0.74 and LM Studio on macOS, with `paste`
+  judges and no failed stages. Failure handling, `api` judges and other agents have only been tested with a
+  scripted stand-in.
 
-The [guide](GUIDE.md#unattended-runs) has the setup and failure handling, and
-[what to do about sleep, lids and dropped connections](GUIDE.md#long-and-unattended-runs).
+[GUIDE-UNATTENDED.md](GUIDE-UNATTENDED.md) goes through it step by step, including failure handling and
+[what to do about sleep and lids](GUIDE-UNATTENDED.md#keeping-the-machine-awake).
 
 ## Commands
 
@@ -170,7 +187,7 @@ to a `_stale-<time>` folder. `judge --force` asks the `api` judges again and rep
 **Backends.** With LM Studio and its `lms` command, the harness loads each stage's model under the
 shared name and sets the context length itself. With any other server, it has no load step: the proxy
 rewrites the model name in each request instead, so the server must be able to serve the model by
-name, and context length stays a server setting. See [Backends in the guide](GUIDE.md#backends).
+name, and context length stays a server setting. See [Backends in the guide](GUIDE-MANUAL.md#backends).
 
 **Judges** can be mixed freely:
 
@@ -203,8 +220,7 @@ Three are included, in rising difficulty: `toy-bepay` (toy), `cron-next` (medium
 - **pytest**, from `requirements.txt`, for the hidden tests and this repo's own tests.
 - **Git.**
 
-**Tested on macOS/Apple Silicon only** with real models and a real agent, and that was the manual flow.
-Beyond that:
+**Tested on macOS/Apple Silicon only** with real models and a real agent. Beyond that:
 
 | Platform | Status |
 |---|---|
@@ -227,7 +243,8 @@ agent's commands are not sandboxed. Use a container or VM if that matters to you
 | `tasks/` | Test tasks |
 | `tests/` | Mock server, scripted agent, reference solutions and end-to-end tests |
 | `examples/` | A real report, and a mock one in the current format |
-| [`GUIDE.md`](GUIDE.md) | Full setup and run walkthrough |
+| [`GUIDE-MANUAL.md`](GUIDE-MANUAL.md) | Full walkthrough of a manual run |
+| [`GUIDE-UNATTENDED.md`](GUIDE-UNATTENDED.md) | Full walkthrough of an unattended run |
 | [`METHODOLOGY.md`](METHODOLOGY.md) | Why it works this way, and known limitations and biases |
 
 ## How this was made

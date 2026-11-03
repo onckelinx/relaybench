@@ -1,6 +1,7 @@
-# relaybench guide
+# Manual run guide
 
-This guide takes you from nothing to a finished test run:
+You drive your coding agent through each stage yourself, in an editor. This guide takes you from nothing to
+a finished test run:
 
 ```
 planner model ──► plan.md ──┬──► builder 1 builds ──► reviewer reviews ──┐
@@ -8,8 +9,9 @@ planner model ──► plan.md ──┬──► builder 1 builds ──► re
 ```
 
 It uses **LM Studio** as the model server and **Cline** in VS Code as the agent, as a worked example.
-Neither is required: see [Backends](#backends) and [Other agents](#other-agents). To do a whole run with
-one command and no editor, see [Unattended runs](#unattended-runs).
+Neither is required: see [Backends](#backends) and [Other agents](#other-agents).
+
+To do a whole run with one command and no editor, use the [unattended guide](GUIDE-UNATTENDED.md) instead.
 
 **How it fits together.** Your agent is set up **once**, to talk to a small logging proxy on your
 machine, and it always asks for a model called `local-model`. The harness makes sure whichever model
@@ -64,11 +66,13 @@ Activate the environment. Do this in every new terminal you use for relaybench:
 | Windows PowerShell | `.venv\Scripts\Activate.ps1` |
 | Windows cmd | `.venv\Scripts\activate.bat` |
 
-Then:
+**Check:** your prompt now starts with `(.venv)`. Then:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+If you see `command not found` for `pip` or `python`, the environment isn't activated.
 
 ### 3. Choose and download models
 
@@ -105,8 +109,26 @@ when no model is loaded and Just-in-Time loading is off. That is fine.)
 python pipeline.py init
 ```
 
-It asks for your server, lists the models it finds, and asks which plays which role, who judges, and
-where runs go. It writes `pipeline.json`, which Git ignores. Run it again whenever you like.
+It asks one question at a time, and the value in `[brackets]` is what you get by pressing Enter. It writes
+`pipeline.json`, which Git ignores. If you make a mistake, press `Ctrl+C` and start again: nothing is saved
+until the end. You can run it again whenever you like.
+
+| Question | What to answer |
+|---|---|
+| Choose (model server) | `1` for LM Studio, `2` for [another server](#backends) |
+| Server URL | Enter, for LM Studio on this machine |
+| Environment variable with the server's API key | Enter, unless your server needs a key |
+| Context length in tokens | Enter, unless you know you want another value |
+| GPU offload | **Enter**, for `max`. `off` means no GPU, so models run far slower. |
+| Port for the logging proxy | Enter |
+| Planner | One number from the list of models, such as `3` |
+| Builders | Numbers separated by commas, such as `6,7` |
+| Reviewers | Numbers separated by commas, or Enter for none |
+| Judge 1 type | `paste` for a web chat you copy to and from, `api` for an API `judge` can call, `human` for a person |
+| Label | A short name for this judge, such as `chatgpt` |
+| Judge 2 type | Another judge, or Enter to finish the list |
+| Runs folder | Enter |
+| Default task | Enter for the toy task, which is best for a first run |
 
 Prefer a text editor? Copy `pipeline.example.json` to `pipeline.json`, and use
 `python pipeline.py models` for the keys. The [README](README.md#configuration) lists every setting.
@@ -351,143 +373,18 @@ digits, dots, dashes and underscores.
 
 ---
 
-# Unattended runs
+# Keeping the machine awake
 
-`python pipeline.py run` does Part B on its own, using an agent with a command-line mode. The manual flow
-is unchanged, and you can use either for any run.
+A sleeping machine stops a run, and a run takes a long time. Leave one of these running in a spare terminal
+until you're done, and press `Ctrl+C` to end it:
 
-**Status: tested with a scripted stand-in only.** `run` has not been used with a real agent or a real
-model yet, so check your first run closely.
-
-### Set it up
-
-1. **Install a command-line agent and point it at the proxy** (base URL `http://127.0.0.1:1235/v1`, model
-   `local-model`, any non-empty key). It must be able to run without asking anything, because nobody is
-   there to answer.
-2. **Add it to `pipeline.json`:**
-
-   ```json
-   "agent": {
-     "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"],
-     "stage_timeout_s": 3600,
-     "idle_timeout_s": 600
-   }
-   ```
-
-   `command` runs once per stage, inside the stage folder. `{base_url}`, `{model}` and `{folder}` in it are
-   filled in. The agent's environment also has `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENAI_MODEL` and a
-   dummy `OPENAI_API_KEY`, so a real key in your shell doesn't reach an agent under test.
-3. **Prefer `api` judges** if the run should finish without you.
-4. Run `python pipeline.py run`. To set a task: `python pipeline.py run --task cron-next`.
-
-Its progress goes to the terminal. Each stage's agent output is in `<run>/agent-logs/`.
-
-**Cline, for example.** Its [CLI reference](https://docs.cline.bot/cli/cli-reference.md) documents `cline auth`
-with `--provider`, `--apikey`, `--baseurl` and `--modelid`, and `--auto-approve true` for running. Its other
-pages don't fully agree on these flags, and we haven't run it, so **confirm with `cline --help`**. The
-command-line version keeps its own settings, separate from the VS Code extension's.
-
-A run on a task with a slow model can pass the one-hour default, so set `stage_timeout_s` to suit.
-
-### When a stage goes wrong
-
-Nothing is retried, because that would give one model a chance the others didn't get.
-
-| What happened | What `run` does |
+| System | Command |
 |---|---|
-| No plan, or an empty one | Stops, since everything depends on it. Fix the cause and run it again. |
-| The agent made **no model calls through the proxy** | The stage fails, even if files appeared. The agent may be using another model, so the work can't be credited to this one. Plans and reviews are renamed `*.rejected`. |
-| A build changed nothing | That build fails: no tests, review or judging, and it shows as failed in the report. |
-| A build has uncommitted work | The harness commits it, and the report says so. |
-| A review is missing or empty | That review fails. Judges see "No review was written". |
-| The agent exits with an error, but left its output | The output counts, and the report says so. |
-| Nothing has happened for `idle_timeout_s`, or the stage hits `stage_timeout_s` | The agent and everything it started are stopped. Any output counts, and the report says so. A model call in progress is never "idle", however slow, so only `stage_timeout_s` can end a stuck call. |
-| A model won't load | That stage fails, and the run carries on. |
-| An `api` judge fails | The report is still written. Run `python pipeline.py judge`, then `report`. |
+| macOS | `caffeinate -i` |
+| Linux | `systemd-inhibit --what=idle:sleep --who=relaybench --why="long run" --mode=block sleep infinity` |
 
-The exit code is 0 when the report is written, even if some stages failed, so read the report's
-*Unattended stages* section. It is 1 if the plan or every build failed or an `api` judge failed, and 130 if
-stopped.
-
-**Interrupted?** Ctrl+C stops the agent and the proxy `run` started. `python pipeline.py run` then resumes
-that run: the unfinished stage starts over in its folder, with whatever files are already there, and the
-report's *Attempts* column shows it. To drop the run instead: `python pipeline.py new-run`, then `run`.
-A run counts as finished once it has a report, so the next `run` starts a new one. If `run` itself was killed
-outright, an agent may still be working. `run` tells you and waits until you've stopped it.
-
-### Using a container
-
-`command` can start a container, so the agent sees only its stage folder. This is the way to stop an
-agent from reaching the hidden tests. A sketch, **not tested**, and how the network reaches the proxy
-depends on your setup:
-
-```json
-"command": ["docker", "run", "--rm", "--network=host", "-v", "{folder}:/work", "-w", "/work",
-            "my-agent-image", "my-agent", "--some-auto-approve-flag",
-            "Follow the instructions in PROMPT.md"]
-```
-
-The hidden tests still run on your machine, outside the container, when `run` reaches the test step.
-
-# Long and unattended runs
-
-A run takes a long time, and a sleeping machine stops it. This applies to manual runs too.
-
-`run` keeps the machine awake by itself where it can (`--allow-sleep` turns that off), and warns if it
-can't. It uses `caffeinate` on macOS and `systemd-inhibit` on Linux. If the machine sleeps anyway, that time
-doesn't count against the stage's limits, and the report marks the stage's wall time as unreliable.
-
-**Whichever you use, plan for these:**
-
-- **On SSH, use `tmux`** (or `nohup`), or a dropped connection ends the session. `run` then stops
-  cleanly and can resume, but that won't help you overnight.
-- **Keep power the same** across runs you want to compare. Battery, power-saving modes and heat all change
-  speed. Note them under *My notes*.
-- **Check a battery will last,** or plug in.
-
-### macOS
-
-```bash
-caffeinate -i python pipeline.py run     # what `run` does for you
-caffeinate -i                            # for a manual run: leave this open in a terminal, Ctrl+C to end
-```
-
-- **Closing a MacBook's lid sleeps it anyway**: `caffeinate` doesn't prevent that. Leave the lid open.
-  Apple's own exception is closed-lid use with an external display and power.
-- **Low Power Mode** changes speeds. Check it's the same in System Settings → Battery for runs you compare.
-- To stop sleep without `caffeinate`, look in System Settings → Battery or Energy. The wording varies by
-  Mac and macOS version.
-
-### Linux
-
-```bash
-# for a manual run: leave this open in a terminal, Ctrl+C to end
-systemd-inhibit --what=idle:sleep --who=relaybench --why="long run" --mode=block sleep infinity
-```
-
-- **Closing a laptop's lid suspends it by default.** Leave it open, or hold that off for one run as well:
-
-  ```bash
-  systemd-inhibit --what=handle-lid-switch --why="long run" --mode=block python pipeline.py run
-  ```
-
-  To change it permanently, set `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf`, and
-  `HandleLidSwitchExternalPower=ignore` too if it's set. Read `man logind.conf` first, because this affects
-  every session.
-- **Desktops have their own settings.** If the machine still suspends, turn off automatic suspend in your
-  desktop's power settings. The names vary. We've checked that the lock is held, but not on every desktop.
-- **Power profiles** (such as `power-saver`) change speeds. Use the same one for runs you compare.
-- Without systemd, `run` warns and carries on, and you'll need your desktop's settings.
-
-### Windows
-
-`run` can't keep Windows awake, so it warns and carries on. Windows has never been tested with relaybench.
-This turns off sleep and hibernation when plugged in (use `-dc` for battery), until you set them back:
-
-```
-powercfg /change standby-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
-```
+**Closing a laptop's lid usually sleeps it anyway**, so leave it open. Lids, power settings and Windows are
+covered under [Keeping the machine awake](GUIDE-UNATTENDED.md#keeping-the-machine-awake) in the other guide.
 
 # Backends
 
@@ -524,7 +421,8 @@ Any agent works if it can use a custom OpenAI-compatible base URL and can edit f
 3. Run it with the stage folder as its workspace, in a new session each time.
 4. Tell it: `Follow the instructions in PROMPT.md`.
 
-An agent with a command-line mode can also do a whole run by itself: see [Unattended runs](#unattended-runs).
+An agent with a command-line mode can also do a whole run by itself: see the
+[unattended guide](GUIDE-UNATTENDED.md).
 
 Some agents leave files in the workspace that can name the model. Common ones are skipped when builds
 are copied for review (see `SKIP_IN_COPY` in `pipeline.py`). If yours leaves others, add them there,
@@ -542,6 +440,7 @@ and watch for `blind` warnings.
 
 | Problem | What to do |
 |---|---|
+| `pip: command not found` | Activate the virtual environment: see Part A, step 2. |
 | `python: command not found` | Try `python3`, or activate the virtual environment. |
 | `pipeline.json not found` | Run `python pipeline.py init`, from the repo folder. |
 | `pytest is not installed` | Activate the virtual environment, then `pip install -r requirements.txt`. |
@@ -550,8 +449,6 @@ and watch for `blind` warnings.
 | `check` says the proxy isn't running | Part A, step 6. The proxy window must stay open. |
 | `check` says the proxy forwards elsewhere | You changed the backend. Restart the proxy. |
 | `check` says a model isn't offered | The key in `pipeline.json` has a typo. Compare with `python pipeline.py models`. |
-| `run` says an agent may still be working | A killed `run` left it behind. Stop that process. If the pid belongs to something else, delete `agent.pid` in the runs folder. |
-| A stage fails with "no model calls reached the proxy" | The agent isn't using the proxy. Check its base URL, and see its log in `<run>/agent-logs/`. |
 | `init` finds no models | With Just-in-Time off and `lms` missing, LM Studio may list only loaded models. Type the ids by hand, or load one first. |
 | `load` or `next` fails while loading | Same as above, or the model is still downloading, or it doesn't fit in memory. Try it in the server's own chat to see the error. |
 | The agent shows a connection error | The proxy or the server isn't running. |
@@ -582,8 +479,6 @@ python pipeline.py blind      # before the reviews
 python pipeline.py packet     # after the reviews
 python pipeline.py judge      # call the api judges
 python pipeline.py report     # after the judges
-
-python pipeline.py run        # all of it, unattended (needs "agent" in pipeline.json)
 ```
 
 In each stage folder: new agent session → `Follow the instructions in PROMPT.md`.

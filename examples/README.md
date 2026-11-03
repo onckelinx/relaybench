@@ -2,29 +2,28 @@
 
 ## A real run: [`REPORT.md`](REPORT.md)
 
-A real run of the `toy-bepay` task on a MacBook Pro with an M5 Max and 128 GB of unified memory: one
-planner, two builders and one reviewer, all running locally, with two cloud judges (GPT-6 and Claude
-Opus 5.5, both on high settings). Both builds passed all 36 hidden tests of the time, and both judges
+A real unattended run (`python pipeline.py run`) of the `toy-bepay` task on a MacBook Pro with an M5 Max and
+128 GB of unified memory: one planner, two builders and one reviewer, all running locally through Cline's
+command-line agent (version 3.0.74), with two cloud judges used through web chats. It took about 31 minutes
+with no failed stages. Build B passed 38 of 41 hidden tests and Build A passed 33 of 41, and both judges
 preferred Build B.
 
-The report is left exactly as it came out of that run, including the **My notes** section: those are
-the author's personal comments, written for their own use. It is a real-world example of how someone
-might use relaybench, not a formal study.
+The report is left exactly as it came out of that run, and its **My notes** section was left blank. It is a
+real-world example of how someone might use relaybench, not a formal study.
 
-It also shows why judges read the code. Both flagged a bug in Build A that the tests missed: its
-`isdigit()`/`int()` check could raise on input like `²`. The task now has tests for this and says that
-digits means ASCII `0`–`9`, so it has 41 tests, and new results aren't directly comparable with this run.
+It shows how the tests and the judges work together. The tests count the failures, and the judges read the
+code and explain them: one traces Build A's failures to its national IBAN check reading the wrong digits.
+Both builds also fail tests for non-ASCII digits, which exist because judges in
+[an earlier run](https://github.com/onckelinx/relaybench/blob/86a38bb/examples/REPORT.md) spotted a bug of that kind that the tests missed.
 
 Read it as an example, not as a ranking of these models:
 
 - **It is one run of one small task.** Models are nondeterministic, and a toy task says little about
   harder work. See [limitations](../METHODOLOGY.md#known-limitations-and-biases).
-- **It predates the public release.** A report from the current version also has attempts per stage,
-  the settings the agent sent, the platform, whether the run was manual or unattended, content hashes
-  and integrity flags.
-- **Conditions were not fully controlled.** As the author's notes in the report say, the agent's
-  command approval changed between the two builds, so their wall times don't compare directly. Build
-  A's wall time includes waiting for approvals; compare *model time* and speed instead.
+- **Compare it with care.** Cline's CLI sent no temperature or output limit, so each model used its defaults.
+  Scores from another agent, or from a manual run, aren't directly comparable.
+- **It comes from commit `86a38bb`.** The current version words one footnote differently, keeps the quotes in
+  the agent's command, and explains the `–` in the settings table.
 - **Speeds depend on hardware** and quantisation, so compare them only within one machine. The
   quantisations used aren't recorded in this report.
 

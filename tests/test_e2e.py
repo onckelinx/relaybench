@@ -7,9 +7,11 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -815,15 +817,49 @@ def test_smoke_rewrite_and_synthetic_model_list(make_stack):
     assert stack.requests()[-1]["model"] == "mock-buggy"
 
 
-@pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl to make a test certificate")
-def test_https_backend(make_stack, tmp_path):
+def make_certificate(tmp_path):
     cert, key = str(tmp_path / "cert.pem"), str(tmp_path / "key.pem")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
                     "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
                    check=True, capture_output=True)
+    return cert, key
+
+
+def wait_for_port(port, seconds=15):
+    def is_open():
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            return True
+        except OSError:
+            return False
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if is_open():
+            return
+        time.sleep(0.05)
+    raise AssertionError("nothing listening on port %d" % port)
+
+
+@pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl to make a test certificate")
+def test_untrusted_certificate_is_not_called_unreachable(make_stack, tmp_path):
+    cert, key = make_certificate(tmp_path)
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"],
+                       mock_args=["--tls-cert", cert, "--tls-key", key])
+    stack.env.pop("SSL_CERT_FILE", None)
+    wait_for_port(stack.mock_port)
+    stack.write_config(backend={"type": "openai-compatible", "url": "https://127.0.0.1:%d/v1" % stack.mock_port})
+    out = stack.cli("load", "mock-good", expect=1)
+    assert "certificate" in out and "not reachable" not in out
+
+
+@pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl to make a test certificate")
+@pytest.mark.skipif(ssl.OPENSSL_VERSION.startswith("LibreSSL"),
+                    reason="LibreSSL ignores SSL_CERT_FILE, which this test needs to trust its certificate")
+def test_https_backend(make_stack, tmp_path):
+    cert, key = make_certificate(tmp_path)
     stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"],
                        mock_args=["--tls-cert", cert, "--tls-key", key], env={"SSL_CERT_FILE": cert})
-    time.sleep(0.5)
+    wait_for_port(stack.mock_port)
     stack.write_config(backend={"type": "openai-compatible", "url": "https://127.0.0.1:%d/v1" % stack.mock_port})
     stack.start_proxy()
     stack.cli("load", "mock-good")
@@ -918,7 +954,7 @@ def test_run_goes_from_nothing_to_a_report(make_stack):
     assert not os.path.exists(os.path.join(stack.runs, "run.pid"))
 
     report = stack.text_in_run("REPORT.md")
-    assert "Mode: unattended, with `%s %s`" % (sys.executable, AGENT) in report
+    assert "Mode: unattended, with `%s`" % shlex.join([sys.executable, AGENT]) in report
     assert "## Unattended stages" in report and "Canned verdict" in report
     summary = stack.summary()
     assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
@@ -956,6 +992,7 @@ def test_run_report_has_the_manual_format_plus_its_own_section(make_stack):
     manual.cli("report")
     manual_report, auto_report = manual.text_in_run("REPORT.md"), auto.text_in_run("REPORT.md")
     assert "- Mode: manual" in manual_report and "## Unattended stages" not in manual_report
+    assert "your approvals" in manual_report and "your approvals" not in auto_report
     assert [h for h in headings(auto_report) if h != "## Unattended stages"][1:] == headings(manual_report)[1:]
     table_headers = re.compile(r"^(\|.*\|)\n\|---", re.MULTILINE)
     added = "| Stage | Outcome | Model calls | Time | Notes |"
@@ -967,13 +1004,15 @@ def test_run_report_has_the_manual_format_plus_its_own_section(make_stack):
 
 
 def test_run_placeholders_and_existing_proxy(make_stack):
-    stack = unattended(make_stack, agent_args=["--base-url", "{base_url}", "--model", "{model}"],
+    stack = unattended(make_stack, "no such folder:hang", agent_args=["--base-url", "{base_url}", "--model", "{model}"],
                        reviewers=[], judges=[])
     stack.start_proxy()
     stack.cli("run", "--allow-sleep")
     assert stack.proxy.poll() is None and proxy_is_up(stack), "a proxy you started is yours to stop"
     assert stack.summary()["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
-    assert "No judges configured" in stack.text_in_run("REPORT.md")
+    report = stack.text_in_run("REPORT.md")
+    assert "No judges configured" in report
+    assert "--misbehave 'no such folder:hang'`" in report, "the report's command must keep its quoting"
 
 
 def test_run_stops_at_judges_that_need_a_person(make_stack):
@@ -1252,7 +1291,7 @@ def test_allow_sleep_takes_no_inhibitor_and_missing_tool_only_warns(make_stack, 
     monkeypatch.setattr(module.platform, "system", lambda: "Linux")
     monkeypatch.setattr(module.shutil, "which", lambda name: None)
     assert module._keep_awake() is None
-    assert "GUIDE.md" in capsys.readouterr().out
+    assert "GUIDE-UNATTENDED.md" in capsys.readouterr().out
     monkeypatch.setattr(module.platform, "system", lambda: "Windows")
     assert module._keep_awake() is None
 
