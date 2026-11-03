@@ -20,7 +20,8 @@ Read it as an example, not as a ranking of these models:
 - **It is one run of one small task.** Models are nondeterministic, and a toy task says little about
   harder work. See [limitations](../METHODOLOGY.md#known-limitations-and-biases).
 - **It predates the public release.** A report from the current version also has attempts per stage,
-  the settings the agent sent, the platform, content hashes and integrity flags.
+  the settings the agent sent, the platform, whether the run was manual or unattended, content hashes
+  and integrity flags.
 - **Conditions were not fully controlled.** As the author's notes in the report say, the agent's
   command approval changed between the two builds, so their wall times don't compare directly. Build
   A's wall time includes waiting for approvals; compare *model time* and speed instead.
@@ -31,8 +32,9 @@ Read it as an example, not as a ranking of these models:
 
 **This one is synthetic.** It was produced by the test suite: a mock model server, a scripted agent
 and canned judges. The models are named after what the mock does (`mock-good`, `mock-buggy`,
-`mock-syntax`), and every speed, token count and score is meaningless. It exists to show every
-section of the current format, and says nothing about any real model.
+`mock-syntax`), and every speed, token count and score is meaningless. It exists to show the current
+format of a manual run, and says nothing about any real model. A report from `pipeline.py run` has one
+more section, *Unattended stages*, listing each stage's outcome and anything that went wrong.
 
 Regenerate it with:
 

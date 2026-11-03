@@ -41,7 +41,8 @@ comparable. [METHODOLOGY.md](METHODOLOGY.md) explains the design and, just as im
 
 It tests models *through an agent you already use*. It is not an agent. You open each stage's folder
 in your coding agent (the [guide](GUIDE.md) uses Cline as its example) and tell it to follow the
-instructions there. Any agent that can talk to an OpenAI-compatible URL works.
+instructions there. Any agent that can talk to an OpenAI-compatible URL works. If yours has a
+command-line mode, [`run`](#unattended-runs) can do the whole run for you.
 
 ## 5-minute quickstart
 
@@ -83,6 +84,40 @@ script playing the agent. It takes a few minutes and needs no GPU:
 python -m pytest
 ```
 
+## Unattended runs
+
+The steps above are the manual way, and they keep working as they are. There is also a second way:
+one command that does everything, with no editor and nobody watching.
+
+```bash
+python pipeline.py run
+```
+
+You give it a command-line agent in `pipeline.json`, and it starts the proxy if needed, keeps the machine
+awake, runs the agent once per stage, and goes on through tests, blinding, packet, judges and report.
+If it's interrupted, the same command resumes the run. A stage that fails or gets stuck is recorded in the
+report, and the rest of the run carries on.
+
+```json
+"agent": {
+  "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"],
+  "stage_timeout_s": 3600,
+  "idle_timeout_s": 600
+}
+```
+
+- **Read this first: nobody approves what the agent does.** Model-written commands run with your
+  privileges, so use a container or VM if that matters to you. See [Security](METHODOLOGY.md#security).
+- **Judges:** only `api` judges can run unattended. With `paste` or `human` judges, `run` writes the report
+  and lists who's still open. Fill those in, then run `report` again.
+- **The plan isn't read by a person** before it is frozen.
+- **Scores from different agents don't compare directly**, so compare runs made the same way. The report
+  records the mode and the agent command. Keep API keys out of the command, since the report shows it.
+- **Status:** tested with a scripted stand-in only, **not yet with a real agent or real model**.
+
+The [guide](GUIDE.md#unattended-runs) has the setup and failure handling, and
+[what to do about sleep, lids and dropped connections](GUIDE.md#long-and-unattended-runs).
+
 ## Commands
 
 | Command | What it does |
@@ -99,6 +134,7 @@ python -m pytest
 | `packet` | Creates the judge packet |
 | `judge [--force]` | Sends the packet to `api` judges |
 | `report` | Collects speed, tests, scores and integrity flags into `REPORT.md` |
+| `run [--task name] [--allow-sleep]` | Does all of the above unattended, or resumes an unfinished run |
 | `start <stage>` | (Re)starts one stage |
 | `load <label>`, `smoke [label]` | Switches to a model by hand; sends it a test message |
 
@@ -125,6 +161,9 @@ to a `_stale-<time>` folder. `judge --force` asks the `api` judges again and rep
 | `builders` | One or more `{label, model}` | |
 | `reviewers` | Zero or more `{label, model}` | |
 | `judges` | Zero or more judges, see below | |
+| `agent.command` | The agent's command line, for `run` only. See [Unattended runs](#unattended-runs). | |
+| `agent.stage_timeout_s` | Most time one stage may take | `3600` |
+| `agent.idle_timeout_s` | Stop a stage after this long with no model call running or starting | `600` |
 
 `label` is the short name used in stage names and reports. `model` is the server's id for the model.
 
@@ -164,7 +203,8 @@ Three are included, in rising difficulty: `toy-bepay` (toy), `cron-next` (medium
 - **pytest**, from `requirements.txt`, for the hidden tests and this repo's own tests.
 - **Git.**
 
-**Tested on macOS/Apple Silicon only** with real models and a real agent. Beyond that:
+**Tested on macOS/Apple Silicon only** with real models and a real agent, and that was the manual flow.
+Beyond that:
 
 | Platform | Status |
 |---|---|

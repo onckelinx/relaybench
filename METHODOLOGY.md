@@ -137,6 +137,14 @@ produced.
 If one model waits for your approval and another doesn't, their wall times can't be compared. Use the
 same auto-approve settings for every stage.
 
+**Unattended runs remove some of these and add others.** With `run`, nobody approves, nudges or commits,
+and nobody fixes the plan, so every model gets the same treatment. That also means a bad plan goes
+straight to every builder. The agent is now a bigger part of what you measure: a command-line agent can
+behave differently from an editor one, even from the same project, so don't compare scores across agents
+or modes. There are no retries, because a retry would give one model a chance the others didn't get.
+A restart after an interruption continues from the files already there, and the report's *Attempts*
+column shows it. Treat such a stage's numbers with care.
+
 ## Known limitations and biases
 
 **Sample size and chance.** Models are nondeterministic, and one run is one sample. A difference of
@@ -214,6 +222,10 @@ relaybench is a measurement tool, not a sandbox.
   and when hidden tests import a build. The temporary copy protects the results, not your system.
 - Prefer an agent that asks before running commands, and consider a container or a VM, especially for
   models from sources you don't fully trust.
+- **`run` removes the person from the loop.** The agent has to auto-approve, so anything a model decides to
+  run, runs, for hours, with nobody watching. A container or VM is the real protection here. It is also
+  the only thing that keeps hidden tests out of reach: mount just the stage folder, and keep the repo and
+  the runs folder outside.
 - The proxy listens on `127.0.0.1` only, and has no authentication.
 - **What leaves your machine.** With a local server, stage traffic stays local. Judge packets
   (the task, plan, all code and reviews) go wherever you send them: `paste` by your own hand, `api`

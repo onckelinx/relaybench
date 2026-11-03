@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -25,6 +26,7 @@ PIPELINE = os.path.join(ROOT, "pipeline.py")
 PROXY = os.path.join(ROOT, "proxy", "llm_proxy.py")
 MOCK = os.path.join(ROOT, "tests", "mock_server.py")
 FAKE_LMS = os.path.join(ROOT, "tests", "fake_lms.py")
+AGENT = os.path.join(ROOT, "tests", "scripted_agent.py")
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 HIDDEN_COUNTS = {"toy-bepay": 41, "cron-next": 100, "wal-kv": 57}
 
@@ -188,6 +190,25 @@ class Stack:
 
     def summary(self):
         return self.json_in_run("tests", "summary.json")
+
+    def load_stage(self):
+        with open(os.path.join(self.logs, "current-stage.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("stage", "")
+
+    def replace_run_agent(self, command):
+        """The agent is part of a run's snapshot, so a test that stops misbehaving has to change it there."""
+        run = self.json_in_run("run.json")
+        run["agent"]["command"] = command
+        with open(os.path.join(self.run_dir(), "run.json"), "w", encoding="utf-8") as fh:
+            json.dump(run, fh)
+
+    def leftover_proxies(self):
+        """A proxy that a killed `run` could not stop."""
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/__health" % self.proxy_port, timeout=2) as resp:
+                return [json.load(resp)["pid"]]
+        except OSError:
+            return []
 
 
 @pytest.fixture
@@ -823,6 +844,484 @@ def test_missing_pytest_is_a_clear_error(make_stack):
     assert result.returncode == 1
     assert "pytest is not installed" in result.stdout
     assert not os.path.exists(os.path.join(stack.run_dir(), "tests", "summary.json"))
+
+
+# ----------------------------------------------------------------- unattended runs
+
+API_JUDGE = {"label": "judge-api", "type": "api", "model": "mock-judge", "api_key_env": "MOCK_JUDGE_KEY"}
+posix_only = pytest.mark.skipif(os.name == "nt", reason="uses POSIX signals and process groups")
+
+
+def unattended(make_stack, *misbehave, models=("mock-planner", "mock-good", "mock-buggy", "mock-reviewer"),
+               agent_args=(), sub="a", **overrides):
+    """A config for `run`, with no proxy started: `run` has to do that itself."""
+    limits = {k: overrides.pop(k) for k in ("stage_timeout_s", "idle_timeout_s") if k in overrides}
+    stack = make_stack(list(models) + ["mock-judge"], sub=sub, env={"MOCK_JUDGE_KEY": "judge-secret"})
+    wait_for_http(stack.mock_url + "/v1/models")
+    command = [sys.executable, AGENT] + list(agent_args)
+    for item in misbehave:
+        command += ["--misbehave", item]
+    settings = {"judges": [dict(API_JUDGE, base_url=stack.mock_url + "/v1")],
+                "agent": dict({"command": command}, **limits)}
+    settings.update(overrides)
+    stack.write_config(**settings)
+    return stack
+
+
+def stage_result(stack, name):
+    return stack.json_in_run("stage-results.json")[name]
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    # A killed child stays listed as a zombie until it is reaped.
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, encoding="utf-8").stdout
+    return bool(state.strip()) and not state.strip().startswith("Z")
+
+
+def wait_until(check, seconds=20):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if check():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def start_run_in_background(stack, *args):
+    output = open(os.path.join(stack.state, "run-output.log"), "w", encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, PIPELINE, "run"] + list(args), cwd=ROOT, env=stack.env,
+                            stdout=output, stderr=subprocess.STDOUT)
+    stack.procs.append(proc)
+    assert wait_until(lambda: os.path.exists(os.path.join(stack.runs, "agent.pid")))
+    return proc
+
+
+def proxy_is_up(stack):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:%d/__health" % stack.proxy_port, timeout=1).read()
+        return True
+    except OSError:
+        return False
+
+
+def test_run_goes_from_nothing_to_a_report(make_stack):
+    # No --base-url: the agent finds the proxy through the environment variables `run` sets.
+    stack = unattended(make_stack)
+    stack.env["OPENAI_API_KEY"] = "a-real-key-from-the-environment"
+    out = stack.cli("run", "--allow-sleep")
+    assert not proxy_is_up(stack), "the proxy this run started must stop with it"
+    assert stack.requests() and not any("a-real-key" in (r.get("auth") or "") for r in stack.requests())
+    assert not os.path.exists(os.path.join(stack.runs, "run.pid"))
+
+    report = stack.text_in_run("REPORT.md")
+    assert "Mode: unattended, with `%s %s`" % (sys.executable, AGENT) in report
+    assert "## Unattended stages" in report and "Canned verdict" in report
+    summary = stack.summary()
+    assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    assert 0 < summary["mock-buggy"]["passed"] < HIDDEN_COUNTS["toy-bepay"]
+    assert "Scores stay hidden" in out and not re.search(r"mock-(good|buggy)\s+\d+ of", out)
+    for stage in ("plan", "build-mock-good", "build-mock-buggy"):
+        assert stage_result(stack, stage)["status"] == "done"
+        assert stage_result(stack, stage)["model_calls"] == 2
+    assert os.path.exists(os.path.join(stack.run_dir(), "agent-logs", "plan.log"))
+    assert stack.json_in_run("run.json")["agent"]["command"][1] == AGENT
+    # Each model answered its own stage.
+    assert {"mock-planner", "mock-good", "mock-buggy", "mock-reviewer"} <= {r["model"] for r in stack.requests()}
+    # A finished run isn't resumed: the next `run` is a new one.
+    first = stack.run_dir()
+    stack.cli("run", "--allow-sleep")
+    assert stack.run_dir() != first
+
+
+def headings(report):
+    return re.findall(r"^#+ .*$", report, re.MULTILINE)
+
+
+def test_run_report_has_the_manual_format_plus_its_own_section(make_stack):
+    auto = unattended(make_stack, sub="auto")
+    auto.cli("run", "--allow-sleep")
+    manual = unattended(make_stack, sub="manual")
+    manual.start_proxy()
+    manual.plan()
+    manual.build_all()
+    manual.cli("test")
+    manual.cli("blind")
+    manual.review_all()
+    manual.cli("packet")
+    manual.cli("judge")
+    manual.cli("report")
+    manual_report, auto_report = manual.text_in_run("REPORT.md"), auto.text_in_run("REPORT.md")
+    assert "- Mode: manual" in manual_report and "## Unattended stages" not in manual_report
+    assert [h for h in headings(auto_report) if h != "## Unattended stages"][1:] == headings(manual_report)[1:]
+    table_headers = re.compile(r"^(\|.*\|)\n\|---", re.MULTILINE)
+    added = "| Stage | Outcome | Model calls | Time | Notes |"
+    assert [h for h in table_headers.findall(auto_report) if h != added] == table_headers.findall(manual_report)
+    assert added in table_headers.findall(auto_report)
+    for label in ("mock-good", "mock-buggy"):
+        assert auto.summary()[label]["passed"] == manual.summary()[label]["passed"]
+        assert auto.summary()[label]["failing"] == manual.summary()[label]["failing"]
+
+
+def test_run_placeholders_and_existing_proxy(make_stack):
+    stack = unattended(make_stack, agent_args=["--base-url", "{base_url}", "--model", "{model}"],
+                       reviewers=[], judges=[])
+    stack.start_proxy()
+    stack.cli("run", "--allow-sleep")
+    assert stack.proxy.poll() is None and proxy_is_up(stack), "a proxy you started is yours to stop"
+    assert stack.summary()["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    assert "No judges configured" in stack.text_in_run("REPORT.md")
+
+
+def test_run_stops_at_judges_that_need_a_person(make_stack):
+    stack = unattended(make_stack, judges=[{"label": "judge-human", "type": "human"}])
+    out = stack.cli("run", "--allow-sleep")
+    assert "Still open" in out and "judge-human" in out
+    assert "no usable scores yet" in stack.text_in_run("REPORT.md")
+    fill_human_scores(os.path.join(stack.run_dir(), "4-judging", "scores-judge-human.md"))
+    stack.cli("report")
+    assert "Filled in by a test." in stack.text_in_run("REPORT.md")
+
+
+def test_run_api_judge_failure_keeps_the_work(make_stack):
+    stack = unattended(make_stack)
+    cfg = stack.load_config()
+    cfg["judges"][0]["base_url"] = "http://127.0.0.1:%d/v1" % free_port()
+    stack.save_config(cfg)
+    out = stack.cli("run", "--allow-sleep", expect=1)
+    assert "no usable answer" in out and "Still open" in out
+    assert os.path.exists(os.path.join(stack.run_dir(), "REPORT.md"))
+
+
+@posix_only
+def test_run_records_each_kind_of_stage_failure(make_stack):
+    """Bad stages are recorded, and the rest of the run carries on."""
+    labels = ["mock-good", "mock-no-commit", "mock-exit", "mock-nothing", "mock-other-model", "mock-leaves-child"]
+    stack = unattended(make_stack, "2-build-2:no-commit", "2-build-3:exit-1", "2-build-4:nothing",
+                       "2-build-5:no-calls", "2-build-6:leave-child", "3-review-:no-calls",
+                       models=["mock-planner", "mock-reviewer"] + labels,
+                       builders=[{"label": l, "model": l} for l in labels])
+    child_file = os.path.join(stack.state, "child.pid")
+    stack.env["SCRIPTED_AGENT_CHILD"] = child_file
+    out = stack.cli("run", "--allow-sleep")
+    full = HIDDEN_COUNTS["toy-bepay"]
+
+    result = stage_result(stack, "build-mock-no-commit")
+    assert result["status"] == "done" and any("didn't commit" in f for f in result["flags"])
+    assert stack.summary()["mock-no-commit"]["passed"] == full
+
+    result = stage_result(stack, "build-mock-exit")
+    assert result["status"] == "done" and "agent exited with code 1" in result["flags"]
+
+    result = stage_result(stack, "build-mock-nothing")
+    assert result["status"] == "failed" and "changed nothing" in result["reason"]
+    assert stack.summary()["mock-nothing"]["no_build"] and stack.summary()["mock-nothing"]["passed"] == 0
+
+    # Work that didn't come through the proxy must never count as the model's.
+    result = stage_result(stack, "build-mock-other-model")
+    assert result["status"] == "failed" and "no model calls" in result["reason"]
+    assert stack.summary()["mock-other-model"]["no_build"]
+
+    assert not alive(child_pid(child_file)), "a process the build left behind would slow the next model"
+    assert stage_result(stack, "build-mock-leaves-child")["status"] == "done"
+
+    # Failed builds aren't anonymised, reviewed or judged, and their reviews weren't accepted either.
+    key = stack.json_in_run("blind-key.json")
+    assert sorted(key["builds"].values()) == ["mock-exit", "mock-good", "mock-leaves-child", "mock-no-commit"]
+    reviews = [n for n in os.listdir(stack.run_dir()) if n.startswith("3-review-")]
+    assert len(reviews) == 4
+    for name in reviews:
+        assert "no model calls" in stage_result(stack, name[2:])["reason"]
+        assert os.path.exists(os.path.join(stack.run_dir(), name, "REVIEW.md.rejected"))
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert packet.count("(No review was written.)") == 4 and "from_another_model" not in packet
+
+    report = stack.text_in_run("REPORT.md")
+    assert "| – | mock-nothing | 0 of %d (no build: the agent failed) |" % full in report
+    assert "Build – (mock-nothing)" in report
+    assert "6 stage(s) failed" in out
+    assert "(FAILED)" in stack.cli("status")
+
+
+def stack_agent_group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def child_pid(child_file):
+    with open(child_file, encoding="utf-8") as fh:
+        return int(fh.read())
+
+
+def test_run_all_builds_failing_still_reports(make_stack):
+    stack = unattended(make_stack, "2-build-:nothing")
+    out = stack.cli("run", "--allow-sleep", expect=1)
+    assert "No build succeeded" in out and not os.path.exists(os.path.join(stack.run_dir(), "blind-key.json"))
+    assert "no build: the agent failed" in stack.text_in_run("REPORT.md")
+
+
+@pytest.mark.parametrize("mode", ["nothing", "no-calls"])
+def test_run_stops_when_the_plan_fails_and_can_retry(make_stack, mode):
+    stack = unattended(make_stack, "1-plan:" + mode)
+    assert "plan stage failed" in stack.cli("run", "--allow-sleep", expect=1)
+    assert not os.path.exists(os.path.join(stack.run_dir(), "plan.md"))
+    assert not os.path.exists(os.path.join(stack.run_dir(), "1-plan", "plan.md"))
+    assert not os.path.exists(os.path.join(stack.run_dir(), "2-build-1"))
+    if mode == "no-calls":
+        assert os.path.exists(os.path.join(stack.run_dir(), "1-plan", "plan.md.rejected"))
+    first = stack.run_dir()
+    stack.replace_run_agent([sys.executable, AGENT])
+    stack.cli("run", "--allow-sleep")
+    assert stack.run_dir() == first and os.path.exists(os.path.join(first, "REPORT.md"))
+
+
+@posix_only
+def test_run_kills_a_stuck_agent_and_what_it_started(make_stack):
+    stack = unattended(make_stack, "2-build-1:hang", idle_timeout_s=2)
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    stack.cli("run", "--allow-sleep")
+    result = stage_result(stack, "build-mock-good")
+    assert result["status"] == "failed"
+    assert "stopped: no model call for 2 s" in result["flags"]
+    assert not alive(child_pid(stack.env["SCRIPTED_AGENT_CHILD"]))
+    assert stack.summary()["mock-buggy"]["passed"] > 0, "the next build still ran"
+
+
+def test_slow_call_is_not_stuck_but_the_stage_limit_still_holds(make_stack):
+    """The call stays in flight far longer than the idle limit, so only the stage limit may end it."""
+    stack = unattended(make_stack, models=("mock-planner", "mock-slow", "mock-good", "mock-reviewer"),
+                       builders=[{"label": "mock-slow", "model": "mock-slow"}, {"label": "mock-good", "model": "mock-good"}],
+                       idle_timeout_s=2, stage_timeout_s=6, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    result = stage_result(stack, "build-mock-slow")
+    assert "stopped: reached the stage limit of 6 s" in result["flags"]
+    assert result["model_calls"] == 1 and result["status"] == "failed"
+    assert any(r.get("aborted") for r in stack.proxy_log() if r["stage"] == "build-mock-slow")
+
+
+@posix_only
+def test_run_interrupted_cleans_up_and_resumes(make_stack):
+    stack = unattended(make_stack, "2-build-1:hang", idle_timeout_s=120)
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    assert wait_until(lambda: os.path.exists(stack.env["SCRIPTED_AGENT_CHILD"]) and
+                      os.path.getsize(stack.env["SCRIPTED_AGENT_CHILD"]))
+    assert stack.load_stage() == "build-mock-good"
+
+    # A second run at the same time would load models under the first one.
+    assert "already working" in stack.cli("run", "--allow-sleep", expect=1)
+
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=20) == 130
+    assert not alive(child_pid(stack.env["SCRIPTED_AGENT_CHILD"]))
+    assert not proxy_is_up(stack)
+    assert not os.path.exists(os.path.join(stack.runs, "agent.pid"))
+
+    stack.replace_run_agent([sys.executable, AGENT])
+    first = stack.run_dir()
+    stack.cli("run", "--allow-sleep")
+    assert stack.run_dir() == first and os.path.exists(os.path.join(first, "REPORT.md"))
+    assert stack.summary()["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    with open(os.path.join(first, "stage-history.jsonl"), encoding="utf-8") as fh:
+        starts = [json.loads(line)["stage"] for line in fh]
+    assert starts.count("build-mock-good") == 2, "the report's Attempts column must show the restart"
+
+
+@posix_only
+def test_run_survives_a_hangup_under_nohup_but_not_otherwise(make_stack):
+    stack = unattended(make_stack, "1-plan:hang", idle_timeout_s=120)
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    output = open(os.path.join(stack.state, "run-output.log"), "w", encoding="utf-8")
+    ignoring = subprocess.Popen([sys.executable, PIPELINE, "run", "--allow-sleep"], cwd=ROOT, env=stack.env,
+                                stdout=output, stderr=subprocess.STDOUT,
+                                preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+    stack.procs.append(ignoring)
+    assert wait_until(lambda: os.path.exists(os.path.join(stack.runs, "agent.pid")))
+    ignoring.send_signal(signal.SIGHUP)
+    time.sleep(1.5)
+    assert ignoring.poll() is None, "a run under nohup must survive a dropped session"
+    ignoring.terminate()
+    assert ignoring.wait(timeout=20) == 130
+
+    plain = start_run_in_background(stack, "--allow-sleep")
+    plain.send_signal(signal.SIGHUP)
+    assert plain.wait(timeout=20) == 130, "without nohup it stops cleanly, so it can resume"
+    assert not proxy_is_up(stack)
+
+
+@posix_only
+def test_run_refuses_while_an_orphaned_agent_is_working(make_stack):
+    stack = unattended(make_stack, "1-plan:hang", idle_timeout_s=120)
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    with open(os.path.join(stack.runs, "agent.pid"), encoding="utf-8") as fh:
+        agent_pid = int(fh.read())
+    proc.kill()  # nothing can clean up after this
+    proc.wait()
+    try:
+        assert "may still be working" in stack.cli("run", "--allow-sleep", expect=1)
+    finally:
+        os.killpg(agent_pid, signal.SIGKILL)
+    stack.replace_run_agent([sys.executable, AGENT])
+    assert wait_until(lambda: not stack_agent_group_alive(agent_pid))
+    stack.cli("run", "--allow-sleep")
+    assert os.path.exists(os.path.join(stack.run_dir(), "REPORT.md"))
+    for proxy_pid in stack.leftover_proxies():
+        os.kill(proxy_pid, signal.SIGKILL)
+
+
+def test_run_checks_before_it_starts(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    stack.write_config()
+    assert "need a command-line agent" in stack.cli("run", expect=1)
+
+    stack.write_config(agent={"command": "not a list"})
+    assert "must be a list" in stack.cli("run", expect=1)
+    stack.write_config(agent={"command": ["x"], "idle_timeout_s": 0})
+    assert "idle_timeout_s" in stack.cli("run", expect=1)
+    stack.write_config(agent={"command": ["no-such-agent-here"]})
+    assert "was not found" in stack.cli("run", expect=1)
+    assert "not found. Only" in stack.cli("check", expect=None)
+
+    agent = {"command": [sys.executable, AGENT]}
+    stack.write_config(agent=agent, judges=[{"label": "j", "type": "api", "base_url": "http://x/v1", "model": "m",
+                                             "api_key_env": "RELAYBENCH_TEST_UNSET_KEY"}])
+    assert "RELAYBENCH_TEST_UNSET_KEY" in stack.cli("run", expect=1)
+    stack.write_config(agent=agent, planner={"label": "gone", "model": "not-on-the-server"})
+    assert "Not offered by the server" in stack.cli("run", expect=1)
+    stack.write_config(agent=agent, backend={"type": "openai-compatible", "url": "http://127.0.0.1:%d" % free_port()})
+    assert "not reachable" in stack.cli("run", expect=1)
+    assert not os.path.exists(os.path.join(stack.runs, "CURRENT")), "nothing starts until the checks pass"
+
+
+def test_run_with_task_refuses_to_abandon_a_run(make_stack):
+    stack = unattended(make_stack, "1-plan:nothing")
+    stack.cli("run", "--allow-sleep", expect=1)
+    assert "isn't finished" in stack.cli("run", "--allow-sleep", "--task", "cron-next", expect=1)
+
+
+@pytest.mark.skipif(not shutil.which("systemd-inhibit"), reason="needs systemd")
+def test_run_holds_a_sleep_inhibitor_only_while_it_runs(make_stack):
+    def listed():
+        out = subprocess.run(["systemd-inhibit", "--list", "--no-pager"], capture_output=True, encoding="utf-8",
+                             errors="replace").stdout
+        return "relaybench" in out and "Unattended run" in out
+
+    for how_it_ends in ("signal", "crash"):
+        stack = unattended(make_stack, "1-plan:hang", sub=how_it_ends, idle_timeout_s=120)
+        stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+        proc = start_run_in_background(stack)
+        with open(os.path.join(stack.state, "run-output.log"), encoding="utf-8") as fh:
+            if "could not keep" in fh.read():
+                proc.terminate()
+                proc.wait()
+                pytest.skip("this session may not take inhibitor locks")
+        assert wait_until(listed)
+        with open(os.path.join(stack.runs, "agent.pid"), encoding="utf-8") as fh:
+            agent_pid = int(fh.read())
+        if how_it_ends == "signal":
+            proc.terminate()
+        else:
+            proc.kill()
+        proc.wait()
+        if how_it_ends == "crash":
+            os.killpg(agent_pid, signal.SIGKILL)
+        assert wait_until(lambda: not listed()), "the inhibitor outlived the run"
+        for proxy_pid in stack.leftover_proxies():
+            os.kill(proxy_pid, signal.SIGKILL)
+
+
+def load_pipeline_module():
+    spec = importlib.util.spec_from_file_location("pipeline_under_test", PIPELINE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_allow_sleep_takes_no_inhibitor_and_missing_tool_only_warns(make_stack, monkeypatch, capsys):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    assert "Keeping the machine awake" not in stack.cli("run", "--allow-sleep")
+    module = load_pipeline_module()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(module.shutil, "which", lambda name: None)
+    assert module._keep_awake() is None
+    assert "GUIDE.md" in capsys.readouterr().out
+    monkeypatch.setattr(module.platform, "system", lambda: "Windows")
+    assert module._keep_awake() is None
+
+
+@posix_only
+def test_macos_keep_awake_arguments(tmp_path, monkeypatch):
+    """Not a test of caffeinate itself, which needs a Mac: only of how it is called."""
+    module = load_pipeline_module()
+    record = tmp_path / "args"
+    fake = tmp_path / "caffeinate"
+    fake.write_text("#!/bin/sh\necho \"$@\" > %s\nexec sleep 30\n" % record)
+    fake.chmod(0o755)
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda name: str(fake))
+    holder = module._keep_awake()
+    assert holder is not None
+    assert wait_until(record.exists)
+    assert wait_until(lambda: record.read_text().strip() == "-i -w %d" % os.getpid())
+    module._release_awake(holder)
+    assert holder.poll() is not None
+
+
+def test_stage_clock_does_not_count_sleep():
+    module = load_pipeline_module()
+    clock = module.StageClock(1000.0, 50.0)
+    clock.tick(1001.0, 51.0, active=False)
+    clock.tick(1002.0, 52.0, active=False)
+    assert (clock.awake, clock.idle, clock.slept) == (2.0, 2.0, 0)
+    clock.tick(1003.0, 53.0, active=True)
+    assert (clock.awake, clock.idle) == (3.0, 0)
+    # Asleep for an hour. Where the monotonic clock pauses, it barely moves; on other systems it jumps too.
+    clock.tick(4604.0, 54.0, active=False)
+    assert (clock.awake, clock.idle, clock.slept) == (3.0, 0, 3601.0)
+    clock.tick(8205.0, 3655.0, active=False)
+    assert (clock.awake, clock.slept) == (3.0, 7202.0)
+    clock.tick(8206.0, 3656.0, active=False)
+    assert (clock.awake, clock.idle) == (4.0, 1.0)
+
+
+def test_sleep_is_flagged_in_the_stage_result(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    module = load_pipeline_module()
+    cfg = stack.load_config()
+    outcome = {"exit_code": 0, "stopped": None, "error": None, "seconds": 60, "slept_s": 1800}
+    with open(os.path.join(stack.run_dir(), "run.json"), encoding="utf-8") as fh:
+        run_id = json.load(fh)["run_id"]
+    result = module._settle_stage(cfg, run_id, "plan", os.path.join(stack.run_dir(), "1-plan"), "plan", outcome, 0)
+    assert result["status"] == "done"
+    assert "machine slept for 30 min, so wall time is unreliable" in result["flags"]
+
+
+def test_uncommitted_work_ignores_instructions_and_agent_leftovers(tmp_path):
+    module = load_pipeline_module()
+    folder = str(tmp_path)
+    module.init_stage_repo(folder)
+    for name in ("TASK.md", "plan.md", "PROMPT.md"):
+        (tmp_path / name).write_text("original\n")
+    module.git(folder, "add", "-A")
+    module.git(folder, "commit", "-q", "-m", "start")
+    (tmp_path / "plan.md").write_text("changed\n")
+    (tmp_path / ".cline").mkdir()
+    (tmp_path / ".cline" / "state.json").write_text("{}")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "x.pyc").write_text("")
+    assert module._uncommitted_work(folder) == []
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a b.py").write_text("x = 1\n")
+    assert module._uncommitted_work(folder) == ["pkg/a b.py"]
 
 
 def test_unit_helpers():

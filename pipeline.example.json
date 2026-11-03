@@ -17,6 +17,12 @@
   "served_model_name": "local-model",
   "test_timeout_s": 600,
 
+  "agent": {
+    "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"],
+    "stage_timeout_s": 3600,
+    "idle_timeout_s": 600
+  },
+
   "planner": {
     "label": "planner-model",
     "model": "PASTE-MODEL-KEY-HERE"

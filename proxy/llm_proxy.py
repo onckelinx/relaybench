@@ -20,6 +20,10 @@ Requests are forwarded unchanged, with three exceptions:
     come from the server instead of being estimated from chunks.
   * If backend.api_key_env is set, that key replaces the agent's Authorization.
 
+The proxy also keeps <logs_dir>/proxy-activity.json current: a change counter and
+the number of calls in flight. `pipeline.py run` uses it to tell a slow model from
+a stuck agent, because a call is only logged once it has ended.
+
 Integrity hits: the proxy searches each request body for the stage's `sentinels`
 (for example `hidden_tests`). Agents resend what they have read, so a hit means
 the model probably saw something it should not have. It is a best-effort flag.
@@ -74,6 +78,7 @@ def _load_settings():
 UPSTREAM, PORT, ALIAS, LOG_DIR, API_KEY_ENV = _load_settings()
 LOG_FILE = os.path.join(LOG_DIR, "proxy-log.jsonl")
 STAGE_FILE = os.path.join(LOG_DIR, "current-stage.json")
+ACTIVITY_FILE = os.path.join(LOG_DIR, "proxy-activity.json")
 PREFIX_RE = re.compile(r"^/run/([^/]+)/([^/]+)(/.*)?$")
 MODEL_CALL_RE = re.compile(r"/(v1/messages|v1/chat/completions|v1/completions|api/v\d+/chat)(\?.*)?$")
 MODELS_LIST_RE = re.compile(r"^/v1/models/?(\?.*)?$")
@@ -83,6 +88,8 @@ HOP_BY_HOP = {
     "accept-encoding",
 }
 _log_lock = threading.Lock()
+_activity_lock = threading.Lock()
+_activity = {"seq": 0, "in_flight": 0}
 
 
 def current_stage():
@@ -92,6 +99,20 @@ def current_stage():
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def note_activity(change=0):
+    with _activity_lock:
+        _activity["seq"] += 1
+        _activity["in_flight"] += change
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            tmp = ACTIVITY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(_activity, fh)
+            os.replace(tmp, ACTIVITY_FILE)
+        except OSError:  # it only informs `pipeline.py run`, so it must never break a model call
+            pass
 
 
 def _fmt(value, digits=1):
@@ -226,9 +247,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _handle(self):
+        self._counted = False
+        try:
+            self._forward()
+        finally:
+            if self._counted:
+                note_activity(-1)
+
+    def _forward(self):
         started = time.time()
         if self.path == "/__health":
-            self._send_simple(200, {"ok": True, "upstream": UPSTREAM})
+            self._send_simple(200, {"ok": True, "upstream": UPSTREAM, "pid": os.getpid()})
             return
 
         stage_info = current_stage()
@@ -251,6 +280,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         is_model_call = bool(MODEL_CALL_RE.search(rest)) and self.command == "POST"
+        if is_model_call:
+            self._counted = True
+            note_activity(1)
         hits = []
         if is_model_call and sentinels:
             text = body.decode("utf-8", "replace")
@@ -390,6 +422,7 @@ class ThreadingServer(http.server.ThreadingHTTPServer):
 
 def main():
     server = ThreadingServer(("127.0.0.1", PORT), ProxyHandler)
+    note_activity()  # clears what a proxy that crashed mid-call left behind
     print("relaybench logging proxy listening on http://127.0.0.1:%d" % PORT)
     print("Forwarding to the model server at %s" % UPSTREAM)
     print("Logging model calls to %s" % LOG_FILE)

@@ -9,6 +9,9 @@ name, so its settings never change between stages. This script switches which
 real model answers to that name, and tells the proxy which run and stage is
 active through <logs_dir>/current-stage.json.
 
+A person normally drives the agent, stage by stage, with `next`. With a
+command-line agent in the config, `run` does the whole run unattended.
+
 Run `python pipeline.py help` for the list of commands, or see GUIDE.md.
 The harness is standard library only (Python 3.9+); hidden tests need pytest.
 """
@@ -52,6 +55,13 @@ MIN_SCAN_LABEL = 4
 # In a virtual environment, and on Windows, `python` is the name that always works.
 PY = "python" if os.name == "nt" or sys.prefix != sys.base_prefix else "python3"
 CMD = PY + " pipeline.py"
+AGENT_POLL_S = 1
+# A gap this long between polls means the machine slept, not that the stage was busy.
+SLEEP_GAP_S = 30
+AGENT_DEFAULTS = {"stage_timeout_s": 3600, "idle_timeout_s": 600}
+AGENT_EXAMPLE = """  "agent": { "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"] }"""
+# Printed instructions are for a person, so `run` turns them off.
+UNATTENDED = False
 
 HELP = """
 Commands (run them from the repository folder):
@@ -68,6 +78,7 @@ Commands (run them from the repository folder):
   {cmd} packet           Create the judge packet
   {cmd} judge            Send the packet to the "api" judges
   {cmd} report           Collect speed, tests and scores into REPORT.md
+  {cmd} run              Do all of the above unattended, with a command-line agent
 
 Less common:
 
@@ -83,6 +94,7 @@ Options:
                          With judge: ask the api judges again, replacing their answers.
                          With init: overwrite pipeline.json without asking.
   --show                 With test: print per-model results (this un-blinds you)
+  --allow-sleep          With run: don't keep the machine awake
 
 Labels are the names in pipeline.json. Set RELAYBENCH_CONFIG to use another config file.
 """.format(cmd=CMD)
@@ -112,6 +124,8 @@ def die(msg):
 
 
 def next_step(lines):
+    if UNATTENDED:
+        return
     print("\nNext:")
     for line in lines:
         print("  " + line)
@@ -151,6 +165,15 @@ def validate_config(cfg):
     backend = cfg.get("backend", {})
     if backend.get("type", "lmstudio") not in ("lmstudio", "openai-compatible"):
         die("backend.type must be \"lmstudio\" or \"openai-compatible\".")
+    agent = cfg.get("agent")
+    if agent is not None:
+        command = agent.get("command") if isinstance(agent, dict) else None
+        if not (isinstance(command, list) and command and all(isinstance(c, str) and c for c in command)):
+            die("agent.command must be a list of strings, like:\n" + AGENT_EXAMPLE)
+        for name in AGENT_DEFAULTS:
+            value = agent.get(name, AGENT_DEFAULTS[name])
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                die("agent.%s must be a number of seconds above 0." % name)
 
 
 def load_config():
@@ -511,6 +534,38 @@ def stage_sentinels(path, run, kind, label):
     return sentinels
 
 
+def _read_stage_results(path):
+    """Outcomes recorded by `run`. Manual runs have none."""
+    try:
+        with open(os.path.join(path, "stage-results.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_stage_results(path, results):
+    tmp = os.path.join(path, "stage-results.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(results, fh, indent=2)
+    os.replace(tmp, os.path.join(path, "stage-results.json"))
+
+
+def _forget_stage_results(path, should_forget):
+    results = _read_stage_results(path)
+    kept = {name: res for name, res in results.items() if not should_forget(name)}
+    if len(kept) != len(results):
+        _write_stage_results(path, kept)
+
+
+def failed_stages(path):
+    return {name for name, res in _read_stage_results(path).items() if res.get("status") == "failed"}
+
+
+def failed_builders(path, run):
+    failed = failed_stages(path)
+    return [b["label"] for b in run["builders"] if "build-" + b["label"] in failed]
+
+
 def ensure_loaded(cfg, source, label):
     """Make `label` the model that answers. `source` is the run's snapshot, or the config outside a run."""
     model = find_model(source, label)
@@ -572,6 +627,7 @@ def start_stage(cfg, run_id, path, run, name, folder, label, kind):
     if not os.path.isdir(folder):
         die("Folder for stage '%s' does not exist: %s" % (name, folder))
     ensure_loaded(cfg, run, label)
+    _forget_stage_results(path, lambda stage: stage == name)
     model_id = None if uses_alias(cfg) else find_model(run, label)["model"]
     set_stage(cfg, run_id, name, label, model_id, stage_sentinels(path, run, kind, label))
     with open(os.path.join(path, "stage-history.jsonl"), "a", encoding="utf-8") as fh:
@@ -882,6 +938,13 @@ def cmd_check(cfg, _args):
                 fail("Judge '%s': the model id is still a placeholder" % judge["label"])
                 problems += 1
 
+    if cfg.get("agent"):
+        tool = cfg["agent"]["command"][0]
+        if shutil.which(tool):
+            ok("Agent for unattended runs: " + tool)
+        else:
+            warn("Agent '%s' not found. Only '%s run' needs it." % (tool, CMD))
+
     ok("Runs folder: " + runs_root(cfg))
     tasks = list_tasks(cfg)
     if cfg.get("task") in tasks:
@@ -958,6 +1021,7 @@ def cmd_new_run(cfg, args):
         "builders": cfg["builders"],
         "reviewers": cfg.get("reviewers", []),
         "judges": cfg.get("judges", []),
+        "agent": cfg.get("agent"),
     }
     with open(os.path.join(path, "run.json"), "w", encoding="utf-8") as fh:
         json.dump(run, fh, indent=2)
@@ -969,42 +1033,55 @@ def cmd_new_run(cfg, args):
     next_step(["%s next      (starts the plan stage)" % CMD])
 
 
-def _next_action(path, run):
-    """Return ('stage', stage-tuple) for a model stage to start, or ('cmd', [lines]) otherwise."""
+def _pending_step(path, run):
+    """What comes next: ('stage', stage-tuple), or the name of a harness step and its details."""
     stages = model_stages(path, run)
+    failed = failed_stages(path)
     plan = stages[0]
     if not stage_done(plan[3], plan[1]):
         return "stage", plan
     if not os.path.exists(os.path.join(path, "plan.md")):
-        return "cmd", ["Read 1-plan/plan.md (fix obvious problems by hand if needed), then run:",
-                       "  %s freeze" % CMD]
+        return "freeze", None
     for stage in stages:
-        if stage[3] == "build" and not stage_done(stage[3], stage[1]):
+        if stage[3] == "build" and not stage_done(stage[3], stage[1]) and stage[0] not in failed:
             return "stage", stage
     if not os.path.exists(os.path.join(path, "tests", "summary.json")):
-        return "cmd", ["%s test" % CMD]
+        return "test", None
     if not read_blind_key(path):
-        return "cmd", ["%s blind" % CMD]
+        return "blind", None
     for stage in stages:
-        if stage[3] == "review" and not stage_done(stage[3], stage[1]):
+        if stage[3] == "review" and not stage_done(stage[3], stage[1]) and stage[0] not in failed:
             return "stage", stage
     judge_dir = os.path.join(path, "4-judging")
     if not os.path.exists(os.path.join(judge_dir, "judge-packet.md")):
-        return "cmd", ["%s packet" % CMD]
+        return "packet", None
     open_judges = [j for j in run.get("judges", [])
                    if not _judge_scores(path, j, read_blind_key(path))["complete"]]
     if open_judges:
+        return "judges", open_judges
+    return "report", None
+
+
+def _next_action(path, run):
+    """Return ('stage', stage-tuple) for a model stage to start, or ('cmd', [lines]) otherwise."""
+    step, detail = _pending_step(path, run)
+    if step == "stage":
+        return "stage", detail
+    if step == "freeze":
+        return "cmd", ["Read 1-plan/plan.md (fix obvious problems by hand if needed), then run:",
+                       "  %s freeze" % CMD]
+    if step == "judges":
         lines = []
-        if any(j["type"] == "api" for j in open_judges):
+        if any(j["type"] == "api" for j in detail):
             lines.append("%s judge      (calls the api judges)" % CMD)
-        for judge in open_judges:
+        for judge in detail:
             if judge["type"] == "paste":
                 lines.append("Paste %s's answer into %s" % (judge["label"], _score_file(path, judge["label"])))
             elif judge["type"] == "human":
                 lines.append("Have %s fill in %s" % (judge["label"], _score_file(path, judge["label"])))
         lines.append("Then run:  %s report" % CMD)
         return "cmd", lines
-    return "cmd", ["%s report" % CMD]
+    return "cmd", ["%s %s" % (CMD, step)]
 
 
 def cmd_next(cfg, _args):
@@ -1043,16 +1120,19 @@ def cmd_status(cfg, _args):
         print("  [%s] %s" % ("x" if done else " ", text))
 
     stages = model_stages(path, run)
+    failed = failed_stages(path)
     line(stage_done("plan", stages[0][1]), "Plan written by %s" % run["planner"]["label"])
     line(os.path.exists(os.path.join(path, "plan.md")), "Plan frozen, build folders created")
     for name, folder, label, kind in stages:
         if kind == "build":
-            line(stage_done(kind, folder), "Build by %s committed" % label)
+            line(stage_done(kind, folder), "Build by %s committed%s"
+                 % (label, " (FAILED)" if name in failed else ""))
     line(os.path.exists(os.path.join(path, "tests", "summary.json")), "Hidden tests run")
     line(bool(read_blind_key(path)), "Builds anonymised, review folders created")
     for name, folder, label, kind in stages:
         if kind == "review":
-            line(stage_done(kind, folder), "Review written: %s" % name[len("review-"):])
+            line(stage_done(kind, folder), "Review written: %s%s"
+                 % (name[len("review-"):], " (FAILED)" if name in failed else ""))
     line(os.path.exists(os.path.join(path, "4-judging", "judge-packet.md")), "Judge packet created")
     key = read_blind_key(path)
     judges = run.get("judges", [])
@@ -1141,6 +1221,7 @@ def cmd_freeze(cfg, args):
     if any(os.path.exists(f) for f in folders) and not args.force:
         die("Build folders already exist. Use 'freeze --force' to set them aside and recreate them.")
     move_to_stale(path, [os.path.basename(f) for f in folders] + _outputs_after_build(path))
+    _forget_stage_results(path, lambda stage: stage != "plan")
 
     frozen = os.path.join(path, "plan.md")
     if os.path.exists(frozen):
@@ -1178,6 +1259,26 @@ def pytest_available():
     return importlib.util.find_spec("pytest") is not None
 
 
+def _kill_tree(proc, grace_s=0):
+    """Stop a process started in its own session, with everything it started."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        proc.kill()
+        proc.wait()
+        return
+    if grace_s:  # some wrappers, such as `docker run`, need the signal to stop what they started
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=grace_s)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+    proc.wait()
+
+
 def _run_logged(command, cwd, env, output_path, timeout):
     """Run a command with its output in a file: a pipe would hang on a process the build left running."""
     kwargs = {"start_new_session": True} if os.name != "nt" else {}
@@ -1188,14 +1289,7 @@ def _run_logged(command, cwd, env, output_path, timeout):
             proc.wait(timeout=timeout)
             return False
         except subprocess.TimeoutExpired:
-            if os.name != "nt":
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
-            else:
-                proc.kill()
-            proc.wait()
+            _kill_tree(proc)
             return True
 
 
@@ -1253,7 +1347,8 @@ def _parse_junit(path):
 
 def _passed_text(res):
     total = res.get("expected") or res.get("ran", "?")
-    flags = [word for word, on in (("timeout", res.get("timeout")),
+    flags = [word for word, on in (("no build: the agent failed", res.get("no_build")),
+                                   ("timeout", res.get("timeout")),
                                    ("collection error", res.get("collection_error")),
                                    ("incomplete", res.get("incomplete"))) if on]
     return "%s of %s%s" % (res.get("passed", "?"), total, " (%s)" % ", ".join(flags) if flags else "")
@@ -1277,10 +1372,17 @@ def cmd_test(cfg, args):
     expected = _expected_test_count(hidden, base_env, min(timeout, 120))
     summary = {}
     show = args is not None and args.show
+    no_build = failed_builders(path, run)
     say("\nRunning hidden tests...\n")
     for builder in run["builders"]:
         label = builder["label"]
         folder = build_folder(path, run, label)
+        if label in no_build:
+            # Testing it would score the starter code, which can pass tests on its own.
+            summary[label] = {"ran": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0, "failing": [],
+                              "collection_error": False, "expected": expected, "timeout": False,
+                              "incomplete": False, "no_build": True}
+            continue
         if not os.path.isdir(folder):
             warn("%s: build folder missing, skipped" % label)
             continue
@@ -1338,7 +1440,11 @@ def cmd_blind(cfg, args):
     move_to_stale(path, ["blind-key.json", "4-judging", "REPORT.md"]
                   + [n for n in os.listdir(path) if n.startswith("3-review-")])
 
-    labels = [b["label"] for b in run["builders"]]
+    no_build = failed_builders(path, run)
+    labels = [b["label"] for b in run["builders"] if b["label"] not in no_build]
+    if not labels:
+        die("No build succeeded, so there is nothing to anonymise.")
+    _forget_stage_results(path, lambda stage: stage.startswith("review-"))
     random.shuffle(labels)
     builds = {build_letter(i): label for i, label in enumerate(labels)}
     reviewers = {"reviewer-%d" % (i + 1): r["label"] for i, r in enumerate(run["reviewers"])}
@@ -1681,13 +1787,14 @@ def cmd_report(cfg, _args):
     run_id, path, run = current_run(cfg)
     key = read_blind_key(path) or {"builds": {}, "reviewers": {}}
     letter_of = {label: letter for letter, label in key["builds"].items()}
+    no_build = failed_builders(path, run)
 
     def stage_name(stage):
         if stage == "plan":
             return "Plan (%s)" % run["planner"]["label"]
         if stage.startswith("build-"):
             label = stage[len("build-"):]
-            return "Build %s (%s)" % (letter_of.get(label, "?"), label)
+            return "Build %s (%s)" % (letter_of.get(label, "–" if label in no_build else "?"), label)
         match = re.match(r"review-([A-Z]+)-by-(reviewer-\d+)", stage)
         if match:
             return "Review of %s (%s) by %s" % (match.group(1), key["builds"].get(match.group(1), "?"),
@@ -1695,6 +1802,7 @@ def cmd_report(cfg, _args):
         return stage
 
     entries = [rec for rec in _read_log(cfg) if rec.get("run_id") == run_id]
+    results = _read_stage_results(path)
 
     order = []
     by_stage = {}
@@ -1722,6 +1830,8 @@ def cmd_report(cfg, _args):
              "- Task: `%s`" % run["task"],
              "- Started: %s" % run["created"],
              "- Platform: %s, Python %s" % (run.get("platform", "?"), run.get("python", "?")),
+             "- Mode: %s" % ("unattended, with `%s`" % " ".join((run.get("agent") or {}).get("command", ["?"]))
+                             if results else "manual"),
              "- Backend: %s" % run.get("backend", {}).get("type", "?"),
              "- Context length: %s" % context_text,
              "- Harness commit: %s · Task hash: %s · Prompts hash: %s · Scoring hash: %s" % (
@@ -1779,7 +1889,8 @@ def cmd_report(cfg, _args):
             tests = json.load(fh)
         lines += ["| Build | Model | Passed | Failing tests |", "|---|---|---|---|"]
         for label, res in tests.items():
-            lines.append("| %s | %s | %s | %s |" % (letter_of.get(label, "?"), label, _passed_text(res),
+            lines.append("| %s | %s | %s | %s |" % (letter_of.get(label, "–" if res.get("no_build") else "?"),
+                                                    label, _passed_text(res),
                                                     ", ".join(res["failing"]) or "–"))
     else:
         lines.append("Not run yet.")
@@ -1831,6 +1942,15 @@ def cmd_report(cfg, _args):
             lines.append("- **%s** prefers Build %s (%s): %s" % (
                 judge, pref, key["builds"].get(str(pref), "?"), data.get("one_line_verdict") or ""))
 
+    if results:
+        lines += ["", "## Unattended stages", "",
+                  "| Stage | Outcome | Model calls | Time | Notes |", "|---|---|---|---|---|"]
+        for stage, res in results.items():
+            notes = ([res["reason"]] if res.get("reason") else []) + res.get("flags", [])
+            lines.append("| %s | %s | %s | %s min | %s |" % (
+                stage_name(stage), res.get("status", "?"), res.get("model_calls", "?"),
+                _f((res.get("seconds") or 0) / 60), "; ".join(notes) or "–"))
+
     lines += ["", "## Integrity flags", ""]
     flags = list(key.get("warnings", []))
     for stage in order:
@@ -1871,6 +1991,445 @@ def cmd_report(cfg, _args):
     say("Copy for your records: %s\n" % copy)
 
 
+# ----------------------------------------------------------------- unattended runs
+
+class StageClock:
+    """How long a stage has really had. A jump between polls means the machine slept, which isn't the stage's time."""
+
+    def __init__(self, wall, mono):
+        self.wall, self.mono = wall, mono
+        self.awake = self.idle = self.slept = 0
+
+    def tick(self, wall, mono, active):
+        wall_step, mono_step = wall - self.wall, mono - self.mono
+        self.wall, self.mono = wall, mono
+        if wall_step > SLEEP_GAP_S:
+            self.slept += wall_step
+            self.idle = 0
+            return
+        self.awake += mono_step
+        self.idle = 0 if active else self.idle + mono_step
+
+
+def _pid_alive(pid, group=False):
+    if os.name == "nt":  # os.kill with signal 0 would stop the process there
+        return False
+    try:
+        (os.killpg if group else os.kill)(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_pid(pid_path):
+    try:
+        with open(pid_path, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid(pid_path, pid):
+    with open(pid_path, "w", encoding="utf-8") as fh:
+        fh.write("%d\n" % pid)
+
+
+def _remove_file(file_path):
+    try:
+        os.remove(file_path)
+    except OSError:
+        pass
+
+
+def _proxy_activity(cfg):
+    """(change counter, calls in flight), from the file the proxy keeps up to date."""
+    try:
+        with open(os.path.join(logs_root(cfg), "proxy-activity.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get("seq"), data.get("in_flight", 0)
+    except (OSError, ValueError, AttributeError):
+        return None, 0
+
+
+def _keep_awake():
+    """Hold off sleep for as long as this process lives, even if it crashes. Returns the holder process."""
+    system = platform.system()
+    if system == "Darwin":
+        tool = shutil.which("caffeinate")
+        command = [tool, "-i", "-w", str(os.getpid())]
+    elif system == "Linux":
+        tool = shutil.which("systemd-inhibit")
+        # The child ends when its stdin closes, and stdin closes when this process ends in any way.
+        command = [tool, "--what=idle:sleep", "--who=relaybench", "--why=Unattended run", "--mode=block",
+                   sys.executable, "-c", "import sys; sys.stdin.read()"]
+    else:
+        tool = None
+    if not tool:
+        warn("Can't keep this machine awake from here. See 'Long and unattended runs' in GUIDE.md.")
+        return None
+    kwargs = {"start_new_session": True} if os.name != "nt" else {}
+    holder = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, **kwargs)
+    time.sleep(0.3)
+    if holder.poll() is not None:
+        warn("%s could not keep this machine awake. See 'Long and unattended runs' in GUIDE.md."
+             % os.path.basename(tool))
+        return None
+    ok("Keeping the machine awake during this run (%s)" % os.path.basename(tool))
+    return holder
+
+
+def _release_awake(holder):
+    if holder is None:
+        return
+    holder.stdin.close()
+    holder.terminate()
+    try:
+        holder.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        holder.kill()
+        holder.wait()
+
+
+def _ensure_proxy(cfg, proxy):
+    """Return the proxy this run started, starting one if nothing answers. A proxy you started is left alone."""
+    try:
+        health = http_json(proxy_url(cfg) + "/__health", timeout=5)
+        if health.get("upstream") and health["upstream"] != backend_root(cfg):
+            die("The running proxy forwards to %s, but the config says %s. Restart the proxy."
+                % (health["upstream"], backend_root(cfg)))
+        return proxy
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+    os.makedirs(logs_root(cfg), exist_ok=True)
+    kwargs = {"start_new_session": True} if os.name != "nt" else {}
+    with open(os.path.join(logs_root(cfg), "proxy-output.log"), "ab") as out:
+        proxy = subprocess.Popen([sys.executable, os.path.join(HERE, "proxy", "llm_proxy.py")], cwd=HERE,
+                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **kwargs)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            http_json(proxy_url(cfg) + "/__health", timeout=1)
+            say("Started the logging proxy.")
+            return proxy
+        except (urllib.error.URLError, OSError, ValueError):
+            if proxy.poll() is not None:
+                break
+            time.sleep(0.1)
+    die("The logging proxy did not start. See %s" % os.path.join(logs_root(cfg), "proxy-output.log"))
+
+
+def _stop_proxy(proxy):
+    if proxy is not None:
+        proxy.terminate()
+        try:
+            proxy.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proxy.kill()
+            proxy.wait()
+
+
+def _run_agent(cfg, agent, path, name, folder):
+    """One agent process for one stage, until it exits or stops making progress."""
+    values = {"{folder}": folder, "{base_url}": proxy_url(cfg) + "/v1", "{model}": served_name(cfg)}
+    command = []
+    for part in agent["command"]:
+        for placeholder, value in values.items():
+            part = part.replace(placeholder, value)
+        command.append(part)
+    # A dummy key on purpose: a real one in your environment should not go to an agent under test.
+    env = dict(os.environ, OPENAI_BASE_URL=values["{base_url}"], OPENAI_API_BASE=values["{base_url}"],
+               OPENAI_API_KEY="relaybench", OPENAI_MODEL=served_name(cfg))
+    stage_limit = agent.get("stage_timeout_s", AGENT_DEFAULTS["stage_timeout_s"])
+    idle_limit = agent.get("idle_timeout_s", AGENT_DEFAULTS["idle_timeout_s"])
+    log_dir = os.path.join(path, "agent-logs")
+    os.makedirs(log_dir, exist_ok=True)
+    pid_path = os.path.join(runs_root(cfg), "agent.pid")
+    kwargs = {"start_new_session": True} if os.name != "nt" else {}
+    outcome = {"exit_code": None, "stopped": None, "error": None, "seconds": 0, "slept_s": 0}
+    started = time.monotonic()
+    with open(os.path.join(log_dir, name + ".log"), "ab") as out:
+        try:
+            proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=subprocess.STDOUT, **kwargs)
+        except OSError as exc:
+            outcome["error"] = str(exc)
+            return outcome
+        _write_pid(pid_path, proc.pid)
+        clock = StageClock(time.time(), started)
+        last_seq = _proxy_activity(cfg)[0]
+        try:
+            while proc.poll() is None:
+                time.sleep(AGENT_POLL_S)
+                seq, in_flight = _proxy_activity(cfg)
+                # A call in flight counts as activity: local models can think for minutes before the first token.
+                clock.tick(time.time(), time.monotonic(), seq != last_seq or in_flight > 0)
+                last_seq = seq
+                if clock.awake > stage_limit:
+                    outcome["stopped"] = "reached the stage limit of %d s" % stage_limit
+                    break
+                if clock.idle > idle_limit:
+                    outcome["stopped"] = "no model call for %d s" % idle_limit
+                    break
+            outcome["exit_code"] = proc.poll()
+        finally:
+            # Also after a normal exit: a server the build left running would slow the next model down.
+            _kill_tree(proc, grace_s=5 if proc.poll() is None else 0)
+            _remove_file(pid_path)
+    outcome["seconds"] = clock.awake
+    outcome["slept_s"] = clock.slept
+    return outcome
+
+
+def _uncommitted_work(folder):
+    """Changed files that are the build's own work, not the instructions or an agent's leftovers."""
+    status = git(folder, "status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0")
+    work = []
+    tokens = iter(status)
+    for token in tokens:
+        if not token:
+            continue
+        rel = token[3:]
+        if token[0] in "RC":  # a rename is followed by its old name
+            next(tokens, None)
+        if rel in ("TASK.md", "plan.md") or any(is_skipped(part, SKIP_IN_COPY) for part in rel.split("/")):
+            continue
+        work.append(rel)
+    return work
+
+
+def _set_aside(file_path):
+    """Keep a rejected plan or review for reading, without it counting as the stage's result."""
+    if os.path.exists(file_path):
+        os.replace(file_path, file_path + ".rejected")
+
+
+def _settle_stage(cfg, run_id, name, folder, kind, outcome, since):
+    """Decide what an agent's stage produced. Returns its entry for stage-results.json."""
+    deadline = time.monotonic() + 5
+    while _proxy_activity(cfg)[1] > 0 and time.monotonic() < deadline:  # stats are logged as a call ends
+        time.sleep(0.1)
+    calls = sum(1 for r in _read_log(cfg) if r.get("run_id") == run_id and r.get("stage") == name
+                and (r.get("epoch") or 0) >= since)
+    result = {"status": "done", "reason": "", "flags": [], "model_calls": calls,
+              "seconds": round(outcome["seconds"], 1), "exit_code": outcome["exit_code"]}
+    if outcome["stopped"]:
+        result["flags"].append("stopped: " + outcome["stopped"])
+    elif outcome["exit_code"]:
+        result["flags"].append("agent exited with code %s" % outcome["exit_code"])
+    if outcome["slept_s"]:
+        result["flags"].append("machine slept for %.0f min, so wall time is unreliable" % (outcome["slept_s"] / 60))
+
+    output = {"plan": "plan.md", "review": "REVIEW.md"}.get(kind)
+    output_path = os.path.join(folder, output) if output else None
+
+    def rejected(reason):
+        result["status"], result["reason"] = "failed", reason
+        if output_path:
+            _set_aside(output_path)
+        return result
+
+    if outcome["error"]:
+        return rejected("the agent could not start: %s" % outcome["error"])
+    if not calls:
+        # Whatever it wrote didn't come from the model under test: the agent may be using its own default model.
+        return rejected("no model calls reached the proxy, so the agent may not be pointed at it")
+    if output_path:
+        if not os.path.exists(output_path):
+            return rejected("%s was not written" % output)
+        with open(output_path, encoding="utf-8", errors="replace") as fh:
+            if not fh.read().strip():
+                return rejected("%s is empty" % output)
+        return result
+    try:
+        work = _uncommitted_work(folder)
+        if work:
+            git(folder, "add", "-A")
+            git(folder, "commit", "-q", "-m", "Uncommitted work, committed by relaybench")
+            result["flags"].append("the agent didn't commit its work, so the harness did")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        return rejected("committing the agent's work failed: %s" % exc)
+    if commit_count(folder) <= 1:
+        return rejected("the agent changed nothing")
+    return result
+
+
+def _run_stage(cfg, run_id, path, run, agent, stage):
+    name, folder, label, kind = stage
+    try:
+        start_stage(cfg, run_id, path, run, name, folder, label, kind)
+    except SystemExit:
+        results = _read_stage_results(path)
+        results[name] = {"status": "failed", "reason": "the model could not be loaded", "flags": [],
+                         "model_calls": 0, "seconds": 0, "exit_code": None}
+        _write_stage_results(path, results)
+        fail("%s: the model could not be loaded" % name)
+        return results[name]
+    since = time.time()
+    outcome = _run_agent(cfg, agent, path, name, folder)
+    result = _settle_stage(cfg, run_id, name, folder, kind, outcome, since)
+    results = _read_stage_results(path)
+    results[name] = result
+    _write_stage_results(path, results)
+    summary = "%s: %s after %.1f min, %d model call(s)" % (name, result["status"], result["seconds"] / 60,
+                                                          result["model_calls"])
+    notes = ([result["reason"]] if result["reason"] else []) + result["flags"]
+    (fail if result["status"] == "failed" else ok)(summary + (" (%s)" % "; ".join(notes) if notes else ""))
+    return result
+
+
+def _run_preflight(cfg, agent, source):
+    """Stop now rather than after hours of building."""
+    if not pytest_available():
+        die("pytest is not installed in this Python. Run:  %s -m pip install -r requirements.txt" % PY)
+    if not shutil.which("git"):
+        die("Git is not installed.")
+    if not shutil.which(agent["command"][0]):
+        die("The agent command '%s' was not found." % agent["command"][0])
+    try:
+        loaded_model_ids(cfg)
+    except (urllib.error.URLError, OSError, ValueError):
+        die("The model server is not reachable at %s. Start it first." % backend_root(cfg))
+    offered = list_models(backend_of(cfg).get("type", "lmstudio"), backend_root(cfg), served_name(cfg),
+                          backend_headers(cfg))
+    for model in all_models(source):
+        if offered and not model_listed(model["model"], offered):
+            die("Not offered by the server: %s (%s). Compare with:  %s models" % (model["label"], model["model"], CMD))
+    for judge in source.get("judges", []):
+        if judge["type"] != "api":
+            continue
+        if judge.get("api_key_env") and not os.environ.get(judge["api_key_env"]):
+            die("Judge '%s': set the environment variable %s first." % (judge["label"], judge["api_key_env"]))
+        if judge.get("model") == PLACEHOLDER:
+            die("Judge '%s': the model id is still a placeholder." % judge["label"])
+
+
+def _resumable_run(cfg):
+    """The current run's id if it has no report yet."""
+    pointer = os.path.join(runs_root(cfg), "CURRENT")
+    if not os.path.exists(pointer):
+        return None
+    with open(pointer, encoding="utf-8") as fh:
+        run_id = fh.read().strip()
+    path = os.path.join(runs_root(cfg), run_id)
+    if not os.path.exists(os.path.join(path, "run.json")) or os.path.exists(os.path.join(path, "REPORT.md")):
+        return None
+    return run_id
+
+
+def _run_steps(cfg, args, run_id, path, run, agent):
+    """Work through the run until it has a report. Returns the process's exit code."""
+    harness_args = argparse.Namespace(force=False, show=False)
+    judge_problem = False
+    judges_asked = False
+    proxy = None
+    try:
+        while True:
+            step, detail = _pending_step(path, run)
+            if step == "stage":
+                proxy = _ensure_proxy(cfg, proxy)
+                result = _run_stage(cfg, run_id, path, run, agent, detail)
+                if detail[3] == "plan" and result["status"] == "failed":
+                    die("The plan stage failed, and every other stage depends on it. "
+                        "Fix the problem and run '%s run' to try again." % CMD)
+            elif step == "freeze":
+                cmd_freeze(cfg, harness_args)
+            elif step == "test":
+                cmd_test(cfg, harness_args)
+                if len(failed_builders(path, run)) == len(run["builders"]):
+                    cmd_report(cfg, harness_args)
+                    fail("No build succeeded, so nothing was reviewed or judged.")
+                    return 1
+            elif step == "blind":
+                cmd_blind(cfg, harness_args)
+            elif step == "packet":
+                cmd_packet(cfg, harness_args)
+            elif step == "judges" and not judges_asked and any(j["type"] == "api" for j in detail):
+                judges_asked = True
+                try:
+                    cmd_judge(cfg, harness_args)
+                except SystemExit:
+                    judge_problem = True
+            else:
+                cmd_report(cfg, harness_args)
+                break
+    finally:
+        _stop_proxy(proxy)
+    failed = failed_stages(path)
+    if failed:
+        warn("%d stage(s) failed: %s" % (len(failed), ", ".join(sorted(failed))))
+    key = read_blind_key(path)
+    open_judges = [j for j in run.get("judges", []) if not _judge_scores(path, j, key)["complete"]]
+    if open_judges:
+        say("Still open, because these judges need a person or failed:")
+        for judge in open_judges:
+            say("  %s (%s): %s" % (judge["label"], judge["type"], _score_file(path, judge["label"])))
+        say("Fill those in (or run '%s judge' for api judges), then run:  %s report\n" % (CMD, CMD))
+    return 1 if judge_problem else 0
+
+
+def cmd_run(cfg, args):
+    global UNATTENDED
+    agent = cfg.get("agent")
+    root = runs_root(cfg)
+    os.makedirs(root, exist_ok=True)
+    run_pid = os.path.join(root, "run.pid")
+    other = _read_pid(run_pid)
+    if other and other != os.getpid() and _pid_alive(other):
+        die("Another '%s run' is already working here (pid %d)." % (CMD, other))
+    agent_pid_path = os.path.join(root, "agent.pid")
+    agent_pid = _read_pid(agent_pid_path)
+    if agent_pid and _pid_alive(agent_pid, group=True):
+        die("An agent from an interrupted run may still be working (pid %d). Stop it first. "
+            "If that pid is something else, delete %s." % (agent_pid, agent_pid_path))
+    _remove_file(agent_pid_path)
+
+    resume = _resumable_run(cfg)
+    if resume and args.task:
+        die("Run %s isn't finished. To leave it and start another:  %s new-run --task %s, then  %s run"
+            % (resume, CMD, args.task, CMD))
+    run_config = cfg
+    if resume:
+        with open(os.path.join(root, resume, "run.json"), encoding="utf-8") as fh:
+            run_config = json.load(fh)
+        agent = run_config.get("agent") or agent
+    if not agent:
+        die("Unattended runs need a command-line agent in pipeline.json, for example:\n%s\n"
+            "See 'Unattended runs' in GUIDE.md." % AGENT_EXAMPLE)
+    _run_preflight(cfg, agent, run_config)
+
+    UNATTENDED = True
+    _write_pid(run_pid, os.getpid())
+    holder = None
+    if os.name != "nt":  # so closing the window or `kill` still cleans up the agent and the proxy
+        signal.signal(signal.SIGTERM, signal.default_int_handler)
+        if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:  # ignored means nohup, which must keep working
+            signal.signal(signal.SIGHUP, signal.default_int_handler)
+    try:
+        if not args.allow_sleep:
+            holder = _keep_awake()
+        if resume:
+            say("\nResuming run %s. To start fresh instead:  %s new-run, then  %s run" % (resume, CMD, CMD))
+        else:
+            cmd_new_run(cfg, args)
+        run_id, path, run = current_run(cfg)
+        if not run.get("agent"):
+            run["agent"] = agent
+            with open(os.path.join(path, "run.json"), "w", encoding="utf-8") as fh:
+                json.dump(run, fh, indent=2)
+        code = _run_steps(cfg, args, run_id, path, run, agent)
+    except KeyboardInterrupt:
+        say("\nStopped. Run '%s run' to resume; the unfinished stage starts again, and the report counts "
+            "that as another attempt.\n" % CMD)
+        code = 130
+    finally:
+        _release_awake(holder)
+        _remove_file(run_pid)
+    sys.exit(code)
+
+
 # ----------------------------------------------------------------- main
 
 def main():
@@ -1884,13 +2443,14 @@ def main():
     parser.add_argument("--task")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--allow-sleep", action="store_true")
     args = parser.parse_args()
 
     commands = {
         "check": cmd_check, "models": cmd_models, "new-run": cmd_new_run, "next": cmd_next,
         "start": cmd_start, "status": cmd_status, "load": cmd_load, "smoke": cmd_smoke,
         "freeze": cmd_freeze, "test": cmd_test, "blind": cmd_blind, "packet": cmd_packet,
-        "judge": cmd_judge, "report": cmd_report,
+        "judge": cmd_judge, "report": cmd_report, "run": cmd_run,
     }
     if args.command == "init":
         try:
