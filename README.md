@@ -108,18 +108,10 @@ one command that does everything, with no editor and nobody watching.
 python pipeline.py run
 ```
 
-You give it a command-line agent in `pipeline.json`, and it starts the proxy if needed, keeps the machine
-awake, runs the agent once per stage, and goes on through tests, blinding, packet, judges and report.
-If it's interrupted, the same command resumes the run. A stage that fails or gets stuck is recorded in the
-report, and the rest of the run carries on.
-
-```json
-"agent": {
-  "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"],
-  "stage_timeout_s": 3600,
-  "idle_timeout_s": 600
-}
-```
+`init` asks which command-line agent to use. `run` then starts the proxy if needed, keeps the machine awake,
+runs the agent once per stage, and goes on through tests, blinding, packet, judges and report. If it's
+interrupted, the same command resumes the run. A stage that fails or gets stuck is recorded in the report, and
+the rest of the run carries on.
 
 - **Read this first: nobody approves what the agent does.** Model-written commands run with your
   privileges, so use a container or VM if that matters to you. See [Security](METHODOLOGY.md#security).

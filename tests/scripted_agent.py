@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL"))
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL"))
     parser.add_argument("--misbehave", action="append", default=[], help="<folder prefix>:<mode>")
+    parser.add_argument("prompt", nargs="?", help="what a real agent is told; this one follows its script")
     args = parser.parse_args()
     folder = os.getcwd()
     mode = "normal"

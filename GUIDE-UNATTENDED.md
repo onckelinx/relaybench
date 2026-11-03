@@ -77,7 +77,19 @@ lms server start
 We recommend turning off **Just in Time Model Loading**, under **Developer → Server Settings** in LM
 Studio. With it on, a wrong model name can quietly load a model with a small context.
 
-### 3. Write your configuration
+### 3. Install the agent
+
+The agent gives models their tools for editing files and running commands. The command-line version of
+Cline keeps its own settings, separate from the VS Code extension's, so set it up even if you already use
+the extension.
+
+```bash
+npm i -g cline
+```
+
+npm may print `deprecated` and `install-scripts` warnings. You can ignore them if `cline --help` works.
+
+### 4. Write your configuration
 
 ```bash
 python pipeline.py init
@@ -100,10 +112,11 @@ It asks one question at a time, and the value in `[brackets]` is what you get by
 | Judge 1 type | See below |
 | Label | A short name for this judge, such as `chatgpt` |
 | Judge 2 type | Another judge, or Enter to finish the list |
+| Choose (agent) | `2` for Cline's command-line agent. See [Other agents](#other-agents) for `3`. |
 | Runs folder | Enter |
 | Default task | Enter for the toy task, which is best for a first run |
 
-When it finishes, it suggests starting the proxy. Step 6 does that, so carry on with step 4.
+When it finishes, it prints what to do next, and the steps below go through the same things.
 
 **Which kind of judge?**
 
@@ -114,18 +127,10 @@ When it finishes, it suggests starting the proxy. Step 6 does that, so carry on 
   that variable with `export` in the same window you start `run` from, or `run` will stop and say so.
 - **`human`** is a person who fills in a score file.
 
-### 4. Install the agent and connect it
+### 5. Connect the agent to the proxy
 
-The agent gives models their tools for editing files and running commands. The command-line version of
-Cline keeps its own settings, separate from the VS Code extension's, so set it up even if you already use
-the extension.
-
-```bash
-npm i -g cline
-```
-
-npm may print `deprecated` and `install-scripts` warnings. You can ignore them if the next command works.
-Now connect it to the logging proxy, **not** to LM Studio:
+`init` printed this command, with your port in it. It connects Cline to the logging proxy, **not** to LM
+Studio. You only need to do it once:
 
 ```bash
 cline auth --provider openai --apikey dummy --baseurl http://127.0.0.1:1235/v1 --modelid local-model
@@ -135,38 +140,8 @@ cline auth --provider openai --apikey dummy --baseurl http://127.0.0.1:1235/v1 -
 the harness decides which real model answers to it. This worked with Cline 3.0.74. If it's rejected, your
 version's options differ: compare with `cline auth --help`. To see what Cline will use, run `cline config`.
 
-### 5. Add the agent to your configuration
-
-`init` doesn't ask about the agent, so add it by hand:
-
-```bash
-nano pipeline.json
-```
-
-Add the `"agent"` part right after the first `{`, so that the top of the file looks like this:
-
-```json
-{
-  "agent": {
-    "command": ["cline", "-y", "Follow the instructions in PROMPT.md"],
-    "stage_timeout_s": 3600,
-    "idle_timeout_s": 600
-  },
-  "task": "toy-bepay",
-```
-
-Keep the comma after the agent's closing `}`. In `nano`, press `Ctrl+O`, Enter, then `Ctrl+X` to save and
-exit. Then check the file:
-
-```bash
-python -m json.tool pipeline.json > /dev/null && echo OK
-```
-
-**Check:** it prints `OK`. If not, the error gives a line number, and the cause is usually a missing comma
-or quote near it.
-
-`-y` is Cline's flag for unsupervised runs, and it worked in a real run with version 3.0.74. Check that
-`cline --help` still lists it in yours. The other settings are explained under [Agent settings](#agent-settings).
+`init` set Cline up to run as `cline -y`. `-y` is its flag for unsupervised runs, and it worked in a real run
+with version 3.0.74. Check that `cline --help` still lists it in yours.
 
 ### 6. Start the logging proxy
 
@@ -201,8 +176,8 @@ cd -
 
 | What you see | What it means |
 |---|---|
-| Files appear, but no new proxy lines | **Don't start a run.** The agent is using some other model. Go back to step 4. |
-| `hello.txt` appears, but `version.txt` doesn't | `-y` allows only a limited set of tools, which may be why. Change `"-y"` to `"--auto-approve", "true"` in step 5, and test again with those flags. |
+| Files appear, but no new proxy lines | **Don't start a run.** The agent is using some other model. Go back to step 5. |
+| `hello.txt` appears, but `version.txt` doesn't | `-y` allows only a limited set of tools, which may be why. Change `"-y"` to `"--auto-approve", "true"` under `agent` in `pipeline.json`, and test again with those flags. |
 | Neither file appears | Read `/tmp/agent-test/out.txt`. |
 
 ## Run
@@ -288,8 +263,8 @@ python pipeline.py run --task toy-bepay
 ```
 
 `run` starts the proxy by itself when none is running, and stops that one when it ends. Once a run has a
-report, the next `run` starts a new one. To change models or judges, run `python pipeline.py init` again
-and **add the `"agent"` part back**, as in step 5, because `init` rewrites the file.
+report, the next `run` starts a new one. To change models or judges, run `python pipeline.py init` again. It
+offers to keep your agent, so you can press Enter at that question.
 
 **Comparing runs?** Keep the agent, its version, the judges and the power setup the same. Don't compare
 scores directly with manual runs, because a command-line agent can behave differently from an editor one.
@@ -339,6 +314,9 @@ you've stopped it.
 
 ## Agent settings
 
+`init` writes these under `agent` in `pipeline.json`. Edit that file to change the limits. Running `init` again
+keeps what you've set if you choose to keep your agent.
+
 | Setting | Meaning | Default |
 |---|---|---|
 | `command` | The agent's command line. It runs once per stage, inside the stage's folder. | Required |
@@ -354,9 +332,10 @@ shell doesn't reach an agent under test.
 ## Other agents
 
 Any agent works if it has a command-line mode, can use a custom OpenAI-compatible base URL, can edit files
-and run commands, and never stops to ask a question. Point it at `http://127.0.0.1:1235/v1` with model
-`local-model`, as in step 4, and put its command in `command`, as in step 5. Then do the test in step 7 with
-that agent. Common agent folders are left out when builds are copied for review. If yours leaves other
+and run commands, and never stops to ask a question. In `init`, choose `3` and type its command, with any flag
+it needs to run without asking. The instructions are added at the end of the command, so it needs to accept
+its prompt there. Point it at `http://127.0.0.1:1235/v1` with model `local-model`, then do the test in step 7
+with that agent. Common agent folders are left out when builds are copied for review. If yours leaves other
 files that name the model, watch for warnings in the report's *Integrity flags*.
 
 ## Other model servers
@@ -380,7 +359,7 @@ The hidden tests still run on your machine, outside the container, when `run` re
 
 ## Keeping the machine awake
 
-`run` keeps the machine awake by itself where it can, with `caffeinate` on macOS and `systemd-inhibit` on
+`run` keeps the machine awake by itself where it can, with `caffeinate -is` on macOS and `systemd-inhibit` on
 Linux. `--allow-sleep` turns that off, and it warns if it can't. If the machine sleeps anyway, that time
 doesn't count against the stage's limits, and the report marks the stage's wall time as unreliable.
 
@@ -395,7 +374,16 @@ doesn't count against the stage's limits, and the report marks the stage's wall 
 - **Closing a MacBook's lid sleeps it anyway**: `caffeinate` doesn't prevent that. Leave the lid open.
   Apple's own exception is closed-lid use with an external display and power.
 - **The screen can be off.** A real run worked over SSH with the screen off and the lid open, with
-  `caffeinate` keeping the Mac awake.
+  `caffeinate -is` keeping the Mac awake. `-i` stops idle sleep, and `-s` also stops system sleep when plugged in.
+- **To keep the Mac awake outside a run,** for example while you set things up over SSH, this carries on after
+  you disconnect:
+
+  ```bash
+  nohup caffeinate -is >/dev/null 2>&1 &
+  ```
+
+  It keeps running until you stop it, so remember to, with `pkill caffeinate`. That also stops the one `run`
+  is using, so don't do it during a run.
 - **Low Power Mode** changes speeds. Check it's the same in System Settings → Battery for runs you compare.
 - To stop sleep without `caffeinate`, look in System Settings → Battery or Energy. The wording varies by
   Mac and macOS version.
@@ -432,14 +420,14 @@ powercfg /change hibernate-timeout-ac 0
 |---|---|
 | `pip: command not found` or `python: command not found` | Activate the environment: `source .venv/bin/activate`, from the `relaybench` folder. |
 | `pipeline.json not found` | Run `python pipeline.py init`, from the `relaybench` folder. |
-| `pipeline.json is not valid JSON` | A missing comma or quote, usually around the `"agent"` part. See step 5. |
-| `Unattended runs need a command-line agent` | Add the `"agent"` part, as in step 5. `init` removes it when it rewrites the file. |
+| `pipeline.json is not valid JSON` | A hand edit left out a comma or quote. The message gives a line number. Or run `init` again. |
+| `Unattended runs need a command-line agent` | Run `python pipeline.py init` again, and choose an agent. |
 | `The agent command ... was not found` | The agent isn't installed, or isn't on your `PATH`. Try the first word of `command` by itself. |
 | `The model server is not reachable` | Start it: `lms server start`. |
 | `Not offered by the server` | A model id in `pipeline.json` has a typo. Compare with `python pipeline.py models`. |
 | `check` says the proxy isn't running | See step 6, or skip it: `run` starts the proxy itself. |
 | `check` says the proxy forwards elsewhere | You changed the backend. Restart the proxy. |
-| A stage fails with "no model calls reached the proxy" | The agent isn't using the proxy. See step 4, and read its log in `agent-logs/` in the run's folder. |
+| A stage fails with "no model calls reached the proxy" | The agent isn't using the proxy. See step 5, and read its log in `agent-logs/` in the run's folder. |
 | `... is already working here` | A `run` is still going, probably in another window. Look with `tmux attach -t relay`. |
 | `run` says an agent may still be working | A killed `run` left it behind. Stop that process. If the pid belongs to something else, delete `agent.pid` in the runs folder. |
 | `set the environment variable ... first` | An `api` judge needs its key. Use `export` in this window, then start again. |

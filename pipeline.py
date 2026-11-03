@@ -60,7 +60,8 @@ AGENT_POLL_S = 1
 # A gap this long between polls means the machine slept, not that the stage was busy.
 SLEEP_GAP_S = 30
 AGENT_DEFAULTS = {"stage_timeout_s": 3600, "idle_timeout_s": 600}
-AGENT_EXAMPLE = """  "agent": { "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"] }"""
+STAGE_MESSAGE = "Follow the instructions in PROMPT.md"
+AGENT_EXAMPLE = """  "agent": { "command": ["my-agent", "--some-auto-approve-flag", "%s"] }""" % STAGE_MESSAGE
 # Printed instructions are for a person, so `run` turns them off.
 UNATTENDED = False
 
@@ -623,7 +624,7 @@ def stage_instructions(cfg, folder, kind):
         "     %s" % folder,
         "2. Start a NEW agent session. It must be able to edit files and run commands.",
         "   (Agent settings, once: base URL %s/v1, model %s.)" % (proxy_url(cfg), served_name(cfg)),
-        "3. Send:  Follow the instructions in PROMPT.md",
+        "3. Send:  " + STAGE_MESSAGE,
         "4. Wait for %s." % done_word,
     ]
     if kind == "build":
@@ -784,6 +785,55 @@ def ask_judges():
         judges.append(judge)
 
 
+def current_agent():
+    """The agent in an existing config, so that running init again doesn't lose it."""
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            agent = json.load(fh).get("agent")
+    except (OSError, ValueError, AttributeError):
+        return None
+    command = agent.get("command") if isinstance(agent, dict) else None
+    if isinstance(command, list) and command and all(isinstance(c, str) and c for c in command):
+        return agent
+    return None
+
+
+def ask_agent(current):
+    """Which command-line agent `run` uses. Returns its settings, or None for manual runs only."""
+    say("\nA command-line agent lets '%s run' do a whole run unattended:" % CMD)
+    say("  1. None: I'll drive an agent myself, stage by stage")
+    say("  2. Cline's command-line agent")
+    say("  3. Another command-line agent")
+    if current:
+        say("  4. Keep the current one: %s" % shlex.join(current["command"]))
+    while True:
+        choice = ask("Choose", "4" if current else "1")
+        if choice == "1":
+            return None
+        if choice == "4" and current:
+            return current
+        if choice == "2":
+            command = ["cline", "-y", STAGE_MESSAGE]
+        elif choice == "3":
+            say("  Type its command, with any flag it needs to run without asking. The instructions are added at")
+            say("  the end. Leave out API keys, because reports show this command.")
+            try:
+                words = shlex.split(ask("  Command"))
+            except ValueError as exc:
+                say("  That command can't be read: %s." % exc)
+                continue
+            if not words:
+                say("  Please type a command, or choose 1 for none.")
+                continue
+            command = words + [STAGE_MESSAGE]
+        else:
+            say("  Please type a number from the list.")
+            continue
+        if not shutil.which(command[0]):
+            warn("'%s' was not found on this machine. Install it before using '%s run'." % (command[0], CMD))
+        return dict(AGENT_DEFAULTS, command=command)
+
+
 def cmd_init(_cfg, args):
     say("\nThis writes %s. Press Ctrl+C to stop without saving.\n" % CONFIG_PATH)
     if os.path.exists(CONFIG_PATH) and not args.force:
@@ -828,6 +878,7 @@ def cmd_init(_cfg, args):
     builders = pick_models("Builders (comma-separated, any number)", models, taken, many=True)
     reviewers = pick_models("Reviewers (comma-separated, may be empty)", models, taken, many=True, required=False)
     judges = ask_judges()
+    agent = ask_agent(current_agent())
 
     say()
     runs_dir = ask("Runs folder", "runs")
@@ -851,6 +902,8 @@ def cmd_init(_cfg, args):
         "reviewers": reviewers,
         "judges": judges,
     }
+    if agent:
+        cfg["agent"] = agent
     validate_config(cfg)
     os.makedirs(os.path.dirname(os.path.abspath(CONFIG_PATH)), exist_ok=True)
     tmp = CONFIG_PATH + ".tmp"
@@ -859,8 +912,18 @@ def cmd_init(_cfg, args):
         fh.write("\n")
     os.replace(tmp, CONFIG_PATH)
     say("\nWrote %s" % CONFIG_PATH)
-    next_step(["Start the proxy in another window:  %s proxy/llm_proxy.py" % PY,
-               "Then check your setup:             %s check" % CMD])
+    steps = []
+    agent_url = "http://127.0.0.1:%d/v1" % proxy_port
+    if agent and agent["command"][0] == "cline":
+        steps += ["Connect Cline to the proxy, once:",
+                  "  cline auth --provider openai --apikey dummy --baseurl %s --modelid %s" % (agent_url, alias)]
+    elif agent:
+        steps.append("Point your agent at the proxy, once: base URL %s, model %s, any non-empty key" % (agent_url, alias))
+    steps += ["Start the proxy in another window:  %s proxy/llm_proxy.py" % PY,
+              "Then check your setup:             %s check" % CMD]
+    if agent:
+        steps.append("Then start an unattended run:      %s run" % CMD)
+    next_step(steps)
 
 
 # ----------------------------------------------------------------- commands
@@ -2069,7 +2132,7 @@ def _keep_awake():
     system = platform.system()
     if system == "Darwin":
         tool = shutil.which("caffeinate")
-        command = [tool, "-i", "-w", str(os.getpid())]
+        command = [tool, "-is", "-w", str(os.getpid())]
     elif system == "Linux":
         tool = shutil.which("systemd-inhibit")
         # The child ends when its stdin closes, and stdin closes when this process ends in any way.
@@ -2407,8 +2470,8 @@ def cmd_run(cfg, args):
             run_config = json.load(fh)
         agent = run_config.get("agent") or agent
     if not agent:
-        die("Unattended runs need a command-line agent in pipeline.json, for example:\n%s\n"
-            "See GUIDE-UNATTENDED.md." % AGENT_EXAMPLE)
+        die("Unattended runs need a command-line agent. Run '%s init' and choose one, or add it to "
+            "pipeline.json:\n%s\nSee GUIDE-UNATTENDED.md." % (CMD, AGENT_EXAMPLE))
     _run_preflight(cfg, agent, run_config)
 
     UNATTENDED = True

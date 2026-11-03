@@ -127,6 +127,7 @@ until the end. You can run it again whenever you like.
 | Judge 1 type | `paste` for a web chat you copy to and from, `api` for an API `judge` can call, `human` for a person |
 | Label | A short name for this judge, such as `chatgpt` |
 | Judge 2 type | Another judge, or Enter to finish the list |
+| Choose (agent) | Enter for none. This is only for [unattended runs](GUIDE-UNATTENDED.md). |
 | Runs folder | Enter |
 | Default task | Enter for the toy task, which is best for a first run |
 
@@ -380,7 +381,7 @@ until you're done, and press `Ctrl+C` to end it:
 
 | System | Command |
 |---|---|
-| macOS | `caffeinate -i` |
+| macOS | `caffeinate -is` |
 | Linux | `systemd-inhibit --what=idle:sleep --who=relaybench --why="long run" --mode=block sleep infinity` |
 
 **Closing a laptop's lid usually sleeps it anyway**, so leave it open. Lids, power settings and Windows are

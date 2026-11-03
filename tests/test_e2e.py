@@ -271,6 +271,7 @@ judge-paste
 human
 judge-human
 
+1
 {runs}
 {task}
 """
@@ -418,7 +419,7 @@ def test_lmstudio_mode_loads_under_alias(make_stack, tmp_path):
     time.sleep(0.3)
 
     # /v1/models is empty here (Just-in-Time off, nothing loaded), so init must use the native API.
-    answers = "1\n%s\n\n65536\nmax\n%d\n1\n2,3\n4\nhuman\n\n\n%s\ntoy-bepay\n" % (stack.mock_url, stack.proxy_port, stack.runs)
+    answers = "1\n%s\n\n65536\nmax\n%d\n1\n2,3\n4\nhuman\n\n\n1\n%s\ntoy-bepay\n" % (stack.mock_url, stack.proxy_port, stack.runs)
     out = stack.cli("init", stdin=answers)
     assert "pub/mock-good" in out and "text-embedding-x" not in out
     cfg = stack.load_config()
@@ -472,6 +473,7 @@ def test_init_numbers_retry_and_key_protection(make_stack):
         "api", "j", stack.mock_url + "/v1", "m",
         "sk-this-is-a-real-looking-key!", "JUDGE_KEY",  # a pasted key is refused
         "",
+        "1",               # no agent
         stack.runs, "cron-next", ""])
     out = stack.cli("init", stdin=answers)
     assert "There is no model number 9" in out
@@ -492,10 +494,72 @@ def test_init_with_server_down_accepts_typed_ids(make_stack):
     stack = make_stack(["x"])
     stack.procs[0].kill()
     stack.procs[0].wait()
-    answers = "\n".join(["2", stack.mock_url + "/v1", "", str(stack.proxy_port), "n", "p/planner", "p/builder", "", "human", "", "", stack.runs, "", ""])
+    answers = "\n".join(["2", stack.mock_url + "/v1", "", str(stack.proxy_port), "n", "p/planner", "p/builder", "", "human", "", "", "1", stack.runs, "", ""])
     out = stack.cli("init", stdin=answers)
     assert "No models found" in out
     assert stack.load_config()["planner"]["model"] == "p/planner"
+
+
+def init_answers(stack, *agent_answers):
+    return "\n".join(["2", stack.mock_url + "/v1", "", str(stack.proxy_port), "mock-planner", "mock-good,mock-buggy",
+                      "", "human", "", ""] + list(agent_answers) + [stack.runs, "", ""]) + "\n"
+
+
+AGENT_MESSAGE = "Follow the instructions in PROMPT.md"
+
+
+def test_init_sets_up_cline_without_editing_the_config(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    out = stack.cli("init", stdin=init_answers(stack, "2"))
+    assert stack.load_config()["agent"] == {"command": ["cline", "-y", AGENT_MESSAGE],
+                                            "stage_timeout_s": 3600, "idle_timeout_s": 600}
+    assert ("cline auth --provider openai --apikey dummy --baseurl http://127.0.0.1:%d/v1 --modelid local-model"
+            % stack.proxy_port) in out
+    assert "pipeline.py run" in out
+
+
+def test_init_again_keeps_the_agent_unless_told_otherwise(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    stack.cli("init", stdin=init_answers(stack, "2"))
+    cfg = stack.load_config()
+    cfg["agent"]["stage_timeout_s"] = 7200  # a setting the person changed by hand must survive
+    stack.save_config(cfg)
+
+    out = stack.cli("init", "--force", stdin=init_answers(stack, ""))
+    assert "Keep the current one: cline -y 'Follow the instructions in PROMPT.md'" in out
+    assert stack.load_config()["agent"] == cfg["agent"]
+
+    stack.cli("init", "--force", stdin=init_answers(stack, "1"))
+    assert "agent" not in stack.load_config()
+    assert "Keep the current one" not in stack.cli("init", "--force", stdin=init_answers(stack, "1"))
+
+
+def test_init_another_agent_and_bad_answers(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    with open(stack.config_path, "w", encoding="utf-8") as fh:
+        fh.write("{ this isn't JSON")  # a broken config must not stop you from writing a new one
+    out = stack.cli("init", "--force", stdin=init_answers(
+        stack, "9", "4", "3", "", "3", "bad 'quote", "3", 'no-such-agent-here --flag "a b"'))
+    assert out.count("Please type a number from the list") == 2, "4 only exists when there is an agent to keep"
+    assert "Please type a command" in out and "can't be read" in out
+    assert "'no-such-agent-here' was not found" in out
+    assert "Point your agent at the proxy" in out
+    assert stack.load_config()["agent"]["command"] == ["no-such-agent-here", "--flag", "a b", AGENT_MESSAGE]
+
+
+def test_init_then_run_needs_no_editing(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-judge"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    stack.cli("init", stdin=init_answers(stack, "3", shlex.join([sys.executable, AGENT])))
+    cfg = stack.load_config()
+    cfg["logs_dir"], cfg["results_dir"] = stack.logs, os.path.join(stack.tmp, "results")  # keeps the repo clean
+    stack.save_config(cfg)
+    stack.cli("run", "--allow-sleep")
+    assert stage_result(stack, "build-mock-good")["status"] == "done"
+    assert "'%s'`" % AGENT_MESSAGE in stack.text_in_run("REPORT.md")
 
 
 def test_init_input_ends_cleanly(make_stack):
@@ -1309,7 +1373,7 @@ def test_macos_keep_awake_arguments(tmp_path, monkeypatch):
     holder = module._keep_awake()
     assert holder is not None
     assert wait_until(record.exists)
-    assert wait_until(lambda: record.read_text().strip() == "-i -w %d" % os.getpid())
+    assert wait_until(lambda: record.read_text().strip() == "-is -w %d" % os.getpid())
     module._release_awake(holder)
     assert holder.poll() is not None
 
