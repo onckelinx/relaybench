@@ -45,5 +45,5 @@ RELAYBENCH_WRITE_EXAMPLE=examples/mock-run-report.md python -m pytest tests -k "
 
 ## Adding your own
 
-Copy a run's `REPORT.md` here, and read it first: reports name your models, and the **My notes**
-section holds whatever you wrote there.
+Copy a run's `REPORT.md` here, and read it first: reports name your models and your hardware, and the
+**My notes** section holds whatever you wrote there.

@@ -403,7 +403,9 @@ def test_full_run(make_stack, task):
     example = os.environ.get("RELAYBENCH_WRITE_EXAMPLE")
     if example and task == "toy-bepay":
         with open(os.path.join(ROOT, example), "w", encoding="utf-8") as fh:
-            fh.write(EXAMPLE_BANNER + stack.text_in_run("REPORT.md"))
+            # Whichever machine regenerates this, its hardware has no place in a public example.
+            fh.write(EXAMPLE_BANNER + re.sub(r"(?m)^- Hardware: .*$", "- Hardware: (left out of this example)",
+                                             stack.text_in_run("REPORT.md")))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the fake lms is a shell script")
