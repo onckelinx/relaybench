@@ -284,8 +284,8 @@ complete runs, each with its own new plan, and compare them at the end:
 python pipeline.py run --task toy-bepay --repeat 3
 ```
 
-If a run is unfinished, it's resumed and counts as the first of the three. To compare finished runs at any
-time:
+If a run is unfinished, it's resumed and counts as the first of the three, and the others use its task. To
+compare finished runs at any time:
 
 ```bash
 python pipeline.py compare --task toy-bepay

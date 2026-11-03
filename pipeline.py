@@ -2738,6 +2738,7 @@ def cmd_run(cfg, args):
             else:
                 cmd_new_run(cfg, args)
             run_id, path, run = current_run(cfg)
+            args.task = run["task"]  # the runs after a resumed one stay on its task, not the config's
             if "agent_version" not in run:
                 run["agent"] = run.get("agent") or agent
                 run["agent_version"] = agent_version(run["agent"]["command"])

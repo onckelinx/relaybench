@@ -1478,6 +1478,14 @@ def test_repeat_carries_on_after_a_failed_plan(make_stack):
     assert "needs a number" in stack.cli("run", "--allow-sleep", "--repeat", "0", expect=1)
 
 
+def test_repeat_stays_on_the_task_of_the_run_it_resumes(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])  # the config's default task is toy-bepay
+    stack.cli("new-run", "--task", "cron-next")
+    stack.cli("run", "--allow-sleep", "--repeat", "2")
+    folders = sorted(n for n in os.listdir(stack.runs) if os.path.isdir(os.path.join(stack.runs, n)))
+    assert len(folders) == 2 and all("cron-next" in n for n in folders), folders
+
+
 def test_one_model_can_be_built_twice_from_the_same_plan(make_stack):
     stack = unattended(make_stack, builders=[{"label": "good-a", "model": "mock-good"},
                                              {"label": "good-b", "model": "mock-good"}], reviewers=[], judges=[])
