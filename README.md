@@ -138,9 +138,9 @@ the rest of the run carries on.
 | `next` | Starts the next stage, or tells you which command is next |
 | `status` | Shows the current run and what comes next |
 | `freeze [--force]` | Freezes `plan.md` and creates one Git repo per builder |
-| `test [--show]` | Runs the hidden tests on every build (scores stay hidden unless `--show`) |
+| `test [--show]` | Runs the hidden tests and each build's own tests (scores stay hidden unless `--show`) |
 | `blind [--force]` | Anonymises builds as A, B, C… and creates the review folders |
-| `packet` | Creates the judge packet |
+| `packet` | Creates the judge packet, with numbered code and the reviews after all the builds |
 | `judge [--force]` | Sends the packet to `api` judges |
 | `report` | Collects speed, tests, scores and integrity flags into `REPORT.md` |
 | `run [--task name] [--repeat n] [--allow-sleep]` | Does all of the above unattended, or resumes an unfinished run. `--repeat` does several runs in a row. |

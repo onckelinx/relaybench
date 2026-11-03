@@ -35,10 +35,10 @@ What this design gives up:
 | Plan | One planner model | `TASK.md`, any starter code | `plan.md` |
 | Freeze | Harness | `plan.md` | A read-only plan and one Git repo per builder |
 | Build | Each builder model | Task, frozen plan, starter code | A committed implementation with its own tests |
-| Test | Harness | Each build | Hidden test results |
+| Test | Harness | Each build | Hidden test results, and the results of the build's own tests |
 | Blind | Harness | Builds | Letters A, B, C… in random order |
 | Review | Each reviewer model | One anonymous build | `REVIEW.md` |
-| Judge | Cloud models and/or people | A packet with task, plan, anonymous builds, test results, reviews | Scores |
+| Judge | Cloud models and/or people | A packet with task, plan, anonymous builds with numbered code, test results, then reviews | Scores |
 | Report | Harness | All of the above, proxy log | `REPORT.md`, which reveals who was who |
 
 ## Frozen plan
@@ -86,10 +86,26 @@ in a run, and judges get the results as strong evidence for correctness.
 - A hash of the task folder is stored when the run starts. `test` warns if the task has changed since.
 - Each included task's tests are checked against a reference solution and against deliberately wrong
   variants that must fail specific tests. Those checks are in `tests/test_e2e.py`.
+- Each build's own tests also run, on their own temporary copy. They don't affect its hidden test score,
+  and judges see the result as evidence for scoring those tests.
 
 Tests only check what they check. A build can pass by accident or fail on an ambiguous reading of the
 task. That is why judges are told to read the code too. In an [earlier real run](https://github.com/onckelinx/relaybench/blob/86a38bb/examples/REPORT.md), both judges found
 a crash in a build that had passed every hidden test, and the tests were extended afterwards.
+
+## What reviewers and judges are held to
+
+Vague reviews and loose scoring were the weakest part of the first real run, so the rules are explicit:
+
+- **Reviewers** give evidence for each issue: an input or command, what should happen, and what actually
+  happens. Only pure code-quality issues may skip this.
+- **Judges** see numbered code, so that citations from them and from reviewers can be checked. Reviews come
+  after all the builds, and judges score the builds first.
+- **Counting** follows fixed rules in the scoring sheet: one root cause counts as one issue, each reported
+  issue is either real or a false alarm, and a missed issue must break a requirement or a hidden test.
+
+Changing the prompts or the scoring sheet changes their hashes in the report, and `compare` keeps runs with
+different hashes apart.
 
 ## Metrics via proxy
 
@@ -104,11 +120,11 @@ every model, independent of the agent's own display. For each model call it reco
 | Model time | Time spent waiting for the model |
 | Wall time | First to last model call in a stage, so it includes tools, approvals and any gap between restarts |
 | Attempts | How often the stage was started. A stage that needed restarts is a finding, not noise. |
-| Temperature, max tokens | What the agent actually sent, per stage |
+| Temperature, max tokens | What was sent to the model, per stage: the agent's values, or `request_overrides` if you pinned them |
 
 The proxy changes requests in as few ways as possible. It adds `stream_options.include_usage` so
-token counts come from the server, and rewrites the model name on servers without a load step. If a
-server still sends no usage data, tokens are counted as stream chunks, marked `~` in the report, and
+token counts come from the server, rewrites the model name on servers without a load step, and applies
+`request_overrides` if you set any. If a server still sends no usage data, tokens are counted as stream chunks, marked `~` in the report, and
 should not be compared across servers.
 
 Calls that were cancelled still count: a model that loops until you stop it is logged with what it
@@ -130,9 +146,13 @@ produced.
 
 **You have to hold these constant yourself, and note them under *My notes* in the report:**
 
-- agent version and settings, including temperature, auto-approval and how many tool calls it may make
-- hardware, power mode, and what else is running (on laptops, plugged in or on battery changes speed)
-- model quantisation and server version
+- agent settings, including auto-approval and how many tool calls it may make, plus temperature and output
+  limit unless you pin them with `request_overrides`
+- power mode and what else is running (on laptops, plugged in or on battery changes speed)
+- server version
+
+The report records hardware, the agent's version in unattended runs, and quantisation where LM Studio
+reports it. Keep those the same too, and add any it lists as `not reported` to your notes.
 - your own interventions: approvals, nudges, manual commits
 
 If one model waits for your approval and another doesn't, their wall times can't be compared. Use the

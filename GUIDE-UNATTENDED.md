@@ -244,6 +244,8 @@ python pipeline.py report
 - **Unattended stages:** every stage should say `done`, with model calls above zero. The *Notes* column
   shows anything that went wrong. See [When a stage goes wrong](#when-a-stage-goes-wrong).
 - **Attempts:** above 1 means a stage restarted after an interruption, so treat its numbers with care.
+- **Hidden tests:** the *Own tests* column shows what happened when the harness ran each build's own tests.
+  Judges see this too. `none found` means pytest found no tests in that build.
 - **Integrity flags:** whether a model may have seen something it shouldn't have.
 - **The top of the report:** hardware, agent version and quantisation are filled in where the system says.
   `not reported` means it couldn't tell, so add those under *My notes*.

@@ -75,7 +75,7 @@ Commands (run them from the repository folder):
   {cmd} next             Start the next stage (switches to the right model)
   {cmd} status           Show the current run and what comes next
   {cmd} freeze           Freeze plan.md and create the build folders
-  {cmd} test             Run the hidden tests on every build
+  {cmd} test             Run the hidden tests and each build's own tests
   {cmd} blind            Anonymise builds and create the review folders
   {cmd} packet           Create the judge packet
   {cmd} judge            Send the packet to the "api" judges

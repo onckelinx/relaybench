@@ -347,9 +347,10 @@ its file has no JSON section with all scores from 1 to 5.
 python pipeline.py report
 ```
 
-`runs/<run-id>/REPORT.md` shows speed per stage, the settings the agent sent, hidden test results,
-scores per judge with averages, integrity flags, and the blind key. Fill in **My notes**, including
-your hardware and agent settings, and run `report` again. It keeps your notes and updates the copy in
+`runs/<run-id>/REPORT.md` shows your hardware and quantisation where the system says, speed per stage, the
+settings sent to the model, hidden and own test results, scores per judge with averages, integrity flags,
+and the blind key. Fill in **My notes**, including your power setup and agent settings, and anything the
+report lists as `not reported`, then run `report` again. It keeps your notes and updates the copy in
 `results/`. Reports name your models, so `results/` is ignored by Git. Commit them only if you want to.
 
 ---
