@@ -15,13 +15,16 @@ Write your review to a new file called `REVIEW.md` with these sections:
 
 1. **Summary** – 2–3 sentences on overall quality.
 2. **Issues** – a table with columns:
-   `#` | `Severity` (critical / major / minor) | `Where` (file:line) | `Problem` | `Suggested fix`
+   `#` | `Severity` (critical / major / minor) | `Where` (file:line) | `Problem` | `Evidence` | `Suggested fix`
+
+   `Evidence` is what shows the problem is real: an input or command, what should happen, and what
+   actually happens when you run it. Write `n/a` only for pure code-quality issues.
 3. **Requirement checklist** – every numbered requirement in `TASK.md`,
    each marked *met*, *partly met* or *not met*, with one line why.
 4. **Plan adherence** – where the code follows or departs from `plan.md`.
 5. **Verdict** – one of: *ship as is*, *fix first*, *redo*.
 
-Only report issues you are confident about. If you are unsure, say so instead of
-guessing. A short, accurate review is better than a long one.
+Only report issues you are confident about, and run the code to check a claim about how it
+behaves. If you are unsure, say so instead of guessing. A short, accurate review is better than a long one.
 
 When `REVIEW.md` is saved, reply with: `REVIEW DONE`.

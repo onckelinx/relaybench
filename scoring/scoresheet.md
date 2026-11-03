@@ -16,13 +16,25 @@ Judge only what is in this packet. Do not guess which model wrote what.
 Use the hidden test results as strong evidence for **Correctness**, but read the
 code too: a test can pass by accident.
 
+For **Own tests**, each build shows what happened when the harness ran its tests. That is
+evidence, not proof of quality: passing tests can still be trivial, so read what they cover.
+
+Score each build on its own code and tests. Reviews are scored separately below.
+
 ## Reviews (each criterion 1–5, plus counts)
 
 For each review, compare its findings with your own reading of the code:
 
 - `real_issues` – how many of its reported issues are genuine
-- `false_alarms` – how many reported issues are wrong or irrelevant
-- `missed_important` – important problems it did not mention
+- `false_alarms` – how many reported issues are wrong, or ask for something `TASK.md` doesn't require
+- `missed_important` – problems it did not mention that break a requirement in `TASK.md` or a hidden test
+
+Count them the same way every time:
+
+- Several reports of one root cause count as one issue.
+- Every issue counts as exactly one of `real_issues` or `false_alarms`.
+- A sensible minor suggestion is real. Documentation counts only if `TASK.md` asks for it.
+- A missed style or minor problem does not count towards `missed_important`.
 - `accuracy` (1–5) – are its claims correct?
 - `usefulness` (1–5) – would a developer fix the right things after reading it?
 

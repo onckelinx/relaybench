@@ -88,7 +88,7 @@ def build_files(task, variant):
 
 
 def variant_of(model):
-    for name in ("buggy", "isdigit", "syntax", "importhang", "loop"):
+    for name in ("buggy", "isdigit", "udigits", "syntax", "importhang", "loop"):
         if name in model:
             return name
     return "good"
@@ -169,7 +169,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self._route()
         models = self.options.models.split(",")
         if self.options.lmstudio and path == "/api/v1/models":
-            rows = [{"key": m, "type": "llm"} for m in models] + [{"key": "text-embedding-x", "type": "embedding"}]
+            rows = [dict({"key": m, "type": "llm"}, **({"format": "mlx", "quantization": {"name": "4bit"}} if "good" in m else {}))
+                    for m in models] + [{"key": "text-embedding-x", "type": "embedding"}]
             self._json(200, {"models": rows})
         elif path == "/v1/models":
             # LM Studio with Just-in-Time loading off lists only what is loaded.
@@ -186,7 +187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         model = req.get("model") or ""
         with open(os.path.join(self.options.state_dir, "requests.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"path": self.path, "model": model, "auth": auth,
-                                 "stream_options": req.get("stream_options")}) + "\n")
+                                 "stream_options": req.get("stream_options"), "temperature": req.get("temperature"),
+                                 "max_tokens": req.get("max_tokens")}) + "\n")
         if path != "/v1/chat/completions":
             return self._json(404, {"error": {"message": "not found: %s" % self.path}})
         if model == JUDGE_MODEL:

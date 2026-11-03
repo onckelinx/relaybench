@@ -82,7 +82,10 @@ class TestOgmValidation(unittest.TestCase):
         # str.isdigit() accepts these, and int() then raises on the superscripts.
         f = _fn("is_valid_ogm")
         for bad in ("\u00b2" * 12, "+++\u00b2\u00b2\u00b2/\u00b2\u00b2\u00b2\u00b2/\u00b2\u00b2\u00b2\u00b2\u00b2+++",
-                    "\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u0660\u0660\u0662"):
+                    "\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u0660\u0660\u0662",
+                    # int() reads these digits, so only a format check that means 0-9 can refuse them.
+                    "+++\u0661\u0662\u0663/\u0664\u0665\u0666\u0667/\u0668\u0669\u0660\u0660\u0662+++",
+                    "\u0661\u0662\u0663456789002", "+++\u0661\u0662\u0663/4567/89002+++"):
             self.assertFalse(f(bad), ascii(bad))
 
 
@@ -129,7 +132,8 @@ class TestIbanValidation(unittest.TestCase):
         self.assertFalse(_fn("is_valid_be_iban")("BE69539007547034"))
 
     def test_iban_ok_but_national_check_wrong(self):
-        self.assertFalse(_fn("is_valid_be_iban")("BE41539007547035"))
+        for iban in ("BE41539007547035", "BE58 8288 3607 5983"):
+            self.assertFalse(_fn("is_valid_be_iban")(iban), iban)
 
     def test_other_country(self):
         self.assertFalse(_fn("is_valid_be_iban")("NL91ABNA0417164300"))

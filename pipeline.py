@@ -81,6 +81,7 @@ Commands (run them from the repository folder):
   {cmd} judge            Send the packet to the "api" judges
   {cmd} report           Collect speed, tests and scores into REPORT.md
   {cmd} run              Do all of the above unattended, with a command-line agent
+  {cmd} compare          Compare finished runs, per model
 
 Less common:
 
@@ -90,7 +91,9 @@ Less common:
 
 Options:
 
-  --task <name>          With new-run: use this task instead of the configured one
+  --task <name>          With new-run or run: use this task instead of the configured one
+                         With compare: only this task
+  --repeat <n>           With run: do n runs in a row, then compare them
   --force                With freeze, blind: redo. Outputs that depended on the old result
                          are moved to a _stale-<time> folder in the run, not deleted.
                          With judge: ask the api judges again, replacing their answers.
@@ -167,6 +170,15 @@ def validate_config(cfg):
     backend = cfg.get("backend", {})
     if backend.get("type", "lmstudio") not in ("lmstudio", "openai-compatible"):
         die("backend.type must be \"lmstudio\" or \"openai-compatible\".")
+    overrides = cfg.get("request_overrides")
+    if overrides is not None:
+        if not isinstance(overrides, dict) or set(overrides) - {"temperature", "max_tokens"}:
+            die("request_overrides can only hold temperature and max_tokens.")
+        temperature, limit = overrides.get("temperature", 0), overrides.get("max_tokens", 1)
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or temperature < 0:
+            die("request_overrides.temperature must be a number of 0 or more.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            die("request_overrides.max_tokens must be a whole number above 0.")
     agent = cfg.get("agent")
     if agent is not None:
         command = agent.get("command") if isinstance(agent, dict) else None
@@ -369,12 +381,12 @@ def get_stage(cfg):
         return {}
 
 
-def set_stage(cfg, run_id, stage, label, model_id=None, sentinels=None):
+def set_stage(cfg, run_id, stage, label, model_id=None, sentinels=None, overrides=None):
     os.makedirs(logs_root(cfg), exist_ok=True)
     tmp = stage_file(cfg) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"run_id": run_id, "stage": stage, "model": label, "model_id": model_id,
-                   "sentinels": sentinels or [],
+                   "sentinels": sentinels or [], "overrides": overrides or {},
                    "since": datetime.datetime.now().isoformat(timespec="seconds")}, fh, indent=2)
     os.replace(tmp, stage_file(cfg))  # the proxy reads this file at any moment
 
@@ -466,6 +478,61 @@ def harness_commit():
         return git(HERE, "rev-parse", "--short", "HEAD").stdout.strip()
     except (subprocess.CalledProcessError, OSError):
         return None
+
+
+def machine_info():
+    """CPU and memory, best effort: speeds mean little without them, and they are easy to forget to note."""
+    cpu, memory = None, None
+    try:
+        if platform.system() == "Darwin":
+            def sysctl(name):
+                return subprocess.run(["sysctl", "-n", name], capture_output=True, encoding="utf-8",
+                                      errors="replace", timeout=5).stdout.strip()
+            cpu, memory = sysctl("machdep.cpu.brand_string"), int(sysctl("hw.memsize"))
+        elif platform.system() == "Linux":
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+                cpu = next((line.split(":", 1)[1].strip() for line in fh if line.startswith("model name")), None)
+            with open("/proc/meminfo", encoding="utf-8", errors="replace") as fh:
+                memory = next((int(line.split()[1]) * 1024 for line in fh if line.startswith("MemTotal")), None)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass
+    return {"cpu": cpu or None, "memory_gb": round(memory / 1024 ** 3) if memory else None}
+
+
+def model_details(cfg):
+    """Each model's format and quantisation, keyed by model id, if the server says. Only LM Studio's own API does."""
+    if backend_of(cfg).get("type", "lmstudio") != "lmstudio":
+        return {}
+    try:
+        rows = http_json(backend_root(cfg) + "/api/v1/models", timeout=5, headers=backend_headers(cfg)).get("models")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return {}
+    details = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        quantisation = row.get("quantization")
+        if isinstance(quantisation, dict):
+            quantisation = quantisation.get("name")
+        words = [str(w) for w in (row.get("format"), quantisation) if w]
+        if row.get("key") and words:
+            details[row["key"]] = " ".join(words)
+    return details
+
+
+def agent_version(command, timeout=10):
+    """What the agent says its version is. Through a file and with a limit, so that it can't stall a run."""
+    work = tempfile.mkdtemp(prefix="relaybench-version-")
+    try:
+        output = os.path.join(work, "version.txt")
+        if _run_logged([command[0], "--version"], work, dict(os.environ), output, timeout):
+            return None
+        with open(output, encoding="utf-8", errors="replace") as fh:
+            return next((line.strip()[:80] for line in fh if line.strip()), None)
+    except OSError:
+        return None
+    finally:
+        force_rmtree(work)
 
 
 def is_unchanged_starter(full_path, rel_path, starter):
@@ -639,7 +706,8 @@ def start_stage(cfg, run_id, path, run, name, folder, label, kind):
     ensure_loaded(cfg, run, label)
     _forget_stage_results(path, lambda stage: stage == name)
     model_id = None if uses_alias(cfg) else find_model(run, label)["model"]
-    set_stage(cfg, run_id, name, label, model_id, stage_sentinels(path, run, kind, label))
+    set_stage(cfg, run_id, name, label, model_id, stage_sentinels(path, run, kind, label),
+              run.get("request_overrides"))
     with open(os.path.join(path, "stage-history.jsonl"), "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"stage": name, "at": datetime.datetime.now().isoformat(timespec="seconds")}) + "\n")
     say("\nSTAGE: %s   (model: %s)" % (name, label))
@@ -1074,6 +1142,7 @@ def cmd_new_run(cfg, args):
     init_stage_repo(plan_dir)
 
     backend = dict(backend_of(cfg))
+    known = model_details(cfg)
     run = {
         "run_id": run_id,
         "task": task,
@@ -1081,6 +1150,7 @@ def cmd_new_run(cfg, args):
         "platform": "%s %s" % (platform.system(), platform.machine()),
         "python": platform.python_version(),
         "harness_commit": harness_commit(),
+        "machine": machine_info(),
         "hashes": {
             "task": tree_hash(source),
             "prompts": tree_hash(os.path.join(HERE, "prompts")),
@@ -1089,6 +1159,9 @@ def cmd_new_run(cfg, args):
         "backend": {"type": backend.get("type", "lmstudio"),
                     "context_length": backend.get("context_length"), "gpu": backend.get("gpu")},
         "context_controlled": uses_alias(cfg),
+        "test_timeout_s": int(cfg.get("test_timeout_s", 600)),
+        "request_overrides": cfg.get("request_overrides") or {},
+        "model_details": {m["label"]: known[m["model"]] for m in all_models(cfg) if m["model"] in known},
         "planner": cfg["planner"],
         "builders": cfg["builders"],
         "reviewers": cfg.get("reviewers", []),
@@ -1417,6 +1490,33 @@ def _parse_junit(path):
     return result
 
 
+def _run_own_tests(folder, env, timeout, output_path):
+    """A build's own tests, on a fresh copy. Judges score them, and reading alone can't tell whether they pass."""
+    work = tempfile.mkdtemp(prefix="relaybench-own-")
+    try:
+        copy = os.path.join(work, "build")
+        copy_tree_filtered(folder, copy, SKIP_IN_COPY)
+        junit = os.path.join(work, "junit.xml")
+        timed_out = _run_logged(_pytest_command("--junitxml", junit), copy, env, output_path, timeout)
+        res = _parse_junit(junit)
+    finally:
+        force_rmtree(work)
+    res["timeout"] = timed_out
+    return res
+
+
+def _own_tests_text(res):
+    own = res.get("own_tests")
+    if not own:  # no build, or a run from before these were measured
+        return "–"
+    if own.get("timeout"):
+        return "timed out"
+    if not own.get("ran"):
+        return "could not be collected" if own.get("collection_error") else "none found"
+    extra = ", some could not be collected" if own.get("collection_error") else ""
+    return "%d of %d passed%s" % (own.get("passed", 0), own["ran"], extra)
+
+
 def _passed_text(res):
     total = res.get("expected") or res.get("ran", "?")
     flags = [word for word, on in (("no build: the agent failed", res.get("no_build")),
@@ -1482,13 +1582,15 @@ def cmd_test(cfg, args):
         res["expected"] = expected
         res["timeout"] = timed_out
         res["incomplete"] = bool(expected and res["ran"] != expected)
+        res["own_tests"] = _run_own_tests(folder, base_env, timeout, os.path.join(out_dir, label + "-own.txt"))
         summary[label] = res
         if timed_out:
             with open(output_path, "a", encoding="utf-8") as fh:
                 fh.write("\nTIMEOUT after %d seconds\n" % timeout)
         if show:
-            say("  %-24s %s%s" % (label, _passed_text(res),
-                                  ("   failing: " + ", ".join(res["failing"])) if res["failing"] else ""))
+            say("  %-24s %s%s  (own tests: %s)" % (label, _passed_text(res),
+                                                   ("   failing: " + ", ".join(res["failing"])) if res["failing"] else "",
+                                                   _own_tests_text(res)))
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
     if not show:
@@ -1623,7 +1725,11 @@ def cmd_packet(cfg, _args):
 
     def fenced(rel, full):
         lang = LANG.get(os.path.splitext(rel)[1], "")
-        return ["### `%s`" % rel.replace(os.sep, "/"), "", "````" + lang, read(full), "````", ""]
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            rows = fh.read().rstrip("\n").split("\n")  # not read(): stripping leading lines would shift the numbers
+        width = len(str(len(rows)))
+        numbered = "\n".join("%*d | %s" % (width, n, row) for n, row in enumerate(rows, start=1))
+        return ["### `%s`" % rel.replace(os.sep, "/"), "", "````" + lang, numbered, "````", ""]
 
     source = task_dir(cfg, run["task"])
     starter = os.path.join(source, "starter")
@@ -1641,6 +1747,7 @@ def cmd_packet(cfg, _args):
     labels = [m["label"] for m in all_models(run)]
     missing_reviews = []
     leaks = []
+    reviews = []
     for letter in sorted_letters(key["builds"]):
         label = key["builds"][letter]
         folder = build_folder(path, run, label)
@@ -1650,23 +1757,32 @@ def cmd_packet(cfg, _args):
                    "Passed **%s**." % _passed_text(res)]
         if res.get("failing"):
             section += ["", "Failing tests: " + ", ".join("`%s`" % t for t in res["failing"])]
+        if res.get("own_tests"):
+            section += ["", "## Own tests", "", "The harness ran this build's own tests: **%s**." % _own_tests_text(res)]
+            if res["own_tests"].get("failing"):
+                section += ["", "Failing: " + ", ".join("`%s`" % t for t in res["own_tests"]["failing"])]
         files, unchanged = _code_files(folder, starter)
         section += ["", "## Files", ""]
         if unchanged:
             section += ["Unchanged from the starter code: " + ", ".join("`%s`" % u for u in unchanged), ""]
         for full in files:
             section += fenced(os.path.relpath(full, folder), full)
+        build_reviews = []
         for r_index in range(1, len(key["reviewers"]) + 1):
             review_file = os.path.join(path, "3-review-%s-by-reviewer-%d" % (letter, r_index), "REVIEW.md")
-            section += ["## Review %s/reviewer-%d" % (letter, r_index), ""]
+            build_reviews += ["## Review %s/reviewer-%d" % (letter, r_index), ""]
             if os.path.exists(review_file):
-                section += [read(review_file), ""]
+                build_reviews += [read(review_file), ""]
             else:
-                section += ["(No review was written.)", ""]
+                build_reviews += ["(No review was written.)", ""]
                 missing_reviews.append("%s/reviewer-%d" % (letter, r_index))
-        if find_label_text("\n".join(section), labels):
+        if find_label_text("\n".join(section + build_reviews), labels):
             leaks.append(letter)
         parts += section
+        reviews += build_reviews
+    if reviews:
+        # Apart from the builds, so that a review doesn't colour the first reading of the code it is about.
+        parts += ["---", "", "# Reviews", "", "Score every build above before you score these.", ""] + reviews
 
     judge_dir = os.path.join(path, "4-judging")
     os.makedirs(judge_dir, exist_ok=True)
@@ -1847,6 +1963,13 @@ def _read_log(cfg):
     return rows
 
 
+def _generation_speed(recs):
+    """Tokens per second while generating, leaving out the wait for the first token."""
+    timed = [r for r in recs if r.get("output_tokens") and r.get("ttft_s") is not None and r.get("total_s")]
+    gen_time = sum(r["total_s"] - r["ttft_s"] for r in timed)
+    return sum(r["output_tokens"] for r in timed) / gen_time if gen_time > 0 else None
+
+
 def _distinct(values):
     seen = []
     for value in values:
@@ -1895,6 +2018,12 @@ def cmd_report(cfg, _args):
                     continue
                 attempts[name] = attempts.get(name, 0) + 1
 
+    machine = run.get("machine") or {}
+    hardware = [machine.get("cpu"), "%s GB" % machine["memory_gb"] if machine.get("memory_gb") else None]
+    hardware = ", ".join(h for h in hardware if h) or "not reported"
+    details = run.get("model_details") or {}
+    limits = ["hidden tests %s s" % run.get("test_timeout_s", "?")]
+    agent_settings = run.get("agent") or {}
     context = run.get("backend", {}).get("context_length")
     context_text = "%s tokens" % context if run.get("context_controlled") else "not controlled by the harness (server setting)"
     hashes = run.get("hashes", {})
@@ -1904,7 +2033,10 @@ def cmd_report(cfg, _args):
              "- Platform: %s, Python %s" % (run.get("platform", "?"), run.get("python", "?")),
              "- Mode: %s" % ("unattended, with `%s`" % shlex.join((run.get("agent") or {}).get("command", ["?"]))
                              if results else "manual"),
+             *(["- Agent version: %s" % (run.get("agent_version") or "not reported")] if results else []),
+             "- Hardware: %s" % hardware,
              "- Backend: %s" % run.get("backend", {}).get("type", "?"),
+             "- Quantisation: %s" % ("; ".join("%s: %s" % item for item in sorted(details.items())) or "not reported"),
              "- Context length: %s" % context_text,
              "- Harness commit: %s · Task hash: %s · Prompts hash: %s · Scoring hash: %s" % (
                  run.get("harness_commit") or "–", hashes.get("task", "–"),
@@ -1912,8 +2044,11 @@ def cmd_report(cfg, _args):
              "- Planner: %s · Builders: %s · Reviewers: %s" % (
                  run["planner"]["label"],
                  ", ".join(b["label"] for b in run["builders"]),
-                 ", ".join(r["label"] for r in run["reviewers"]) or "none"),
-             "", "## Speed per stage (from the proxy log)", ""]
+                 ", ".join(r["label"] for r in run["reviewers"]) or "none")]
+    if results:
+        limits = ["stage %s s" % agent_settings.get("stage_timeout_s", AGENT_DEFAULTS["stage_timeout_s"]),
+                  "idle %s s" % agent_settings.get("idle_timeout_s", AGENT_DEFAULTS["idle_timeout_s"])] + limits
+    lines += ["- Limits: " + ", ".join(limits), "", "## Speed per stage (from the proxy log)", ""]
     any_estimate = False
     if order:
         lines += ["| Stage | Attempts | Model calls | Errors | Input tokens | Output tokens | Median time to first token | "
@@ -1926,17 +2061,13 @@ def cmd_report(cfg, _args):
             out = sum(r.get("output_tokens") or 0 for r in recs)
             estimated = any(r.get("usage_source") == "chunks" for r in recs)
             any_estimate = any_estimate or estimated
-            gen_out = sum(r["output_tokens"] for r in recs
-                          if r.get("output_tokens") and r.get("ttft_s") is not None and r.get("total_s"))
-            gen_time = sum(r["total_s"] - r["ttft_s"] for r in recs
-                           if r.get("output_tokens") and r.get("ttft_s") is not None and r.get("total_s"))
             model_time = sum(r.get("total_s") or 0 for r in recs)
             wall = (max(r["epoch"] + (r.get("total_s") or 0) for r in recs) - min(r["epoch"] for r in recs))
             lines.append("| %s | %s | %d | %d | %s | %s%s | %s s | %s tok/s | %s min | %s min |" % (
                 stage_name(stage), attempts.get(stage, "–"), len(recs), errors, "{:,}".format(inp),
                 "~" if estimated else "", "{:,}".format(out),
                 _f(_median([r.get("ttft_s") for r in recs])),
-                _f(gen_out / gen_time if gen_time > 0 else None),
+                _f(_generation_speed(recs)),
                 _f(model_time / 60), _f(wall / 60)))
         included = "tool use and any gap between attempts" if results else \
             "tool use, your approvals and any gap between attempts"
@@ -1945,13 +2076,19 @@ def cmd_report(cfg, _args):
         if any_estimate:
             lines += ["", "`~` = the server sent no token counts for some calls, so those are counted in stream "
                           "chunks. Speeds for such stages are estimates; don't compare them across servers."]
-        lines += ["", "## Settings the agent sent", "",
+        lines += ["", "## Settings sent to the model", "",
                   "| Stage | Temperature | Max tokens |", "|---|---|---|"]
+
+        def setting(recs, field):
+            pinned = any(field in (r.get("pinned") or []) for r in recs)
+            return _distinct(r.get(field) for r in recs) + (" (pinned)" if pinned else "")
+
         for stage in order:
             recs = by_stage[stage]
-            lines.append("| %s | %s | %s |" % (stage_name(stage), _distinct(r.get("temperature") for r in recs),
-                                               _distinct(r.get("max_tokens") for r in recs)))
-        lines += ["", "`–` = the agent didn't send this setting, so the server's or the model's default applied."]
+            lines.append("| %s | %s | %s |" % (stage_name(stage), setting(recs, "temperature"),
+                                               setting(recs, "max_tokens")))
+        lines += ["", "`–` = not sent, so the server's or the model's default applied. "
+                      "*pinned* = set by `request_overrides` in the config, replacing what the agent sent."]
     else:
         lines.append("No proxy log entries for this run. Was the proxy running, and was each stage "
                      "started with '%s next'?" % CMD)
@@ -1961,10 +2098,10 @@ def cmd_report(cfg, _args):
     if os.path.exists(tests_path):
         with open(tests_path, encoding="utf-8") as fh:
             tests = json.load(fh)
-        lines += ["| Build | Model | Passed | Failing tests |", "|---|---|---|---|"]
+        lines += ["| Build | Model | Passed | Own tests | Failing tests |", "|---|---|---|---|---|"]
         for label, res in tests.items():
-            lines.append("| %s | %s | %s | %s |" % (letter_of.get(label, "–" if res.get("no_build") else "?"),
-                                                    label, _passed_text(res),
+            lines.append("| %s | %s | %s | %s | %s |" % (letter_of.get(label, "–" if res.get("no_build") else "?"),
+                                                         label, _passed_text(res), _own_tests_text(res),
                                                     ", ".join(res["failing"]) or "–"))
     else:
         lines.append("Not run yet.")
@@ -2063,6 +2200,112 @@ def cmd_report(cfg, _args):
     shutil.copyfile(report, copy)
     say("\nReport written: %s" % report)
     say("Copy for your records: %s\n" % copy)
+
+
+# ----------------------------------------------------------------- comparing runs
+
+def _finished_runs(cfg, task):
+    """Runs with a report, oldest first. Without one a run may be in progress, and you may still be blind."""
+    root = runs_root(cfg)
+    found = []
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        path = os.path.join(root, name)
+        if not os.path.exists(os.path.join(path, "REPORT.md")):
+            continue
+        try:
+            with open(os.path.join(path, "run.json"), encoding="utf-8") as fh:
+                run = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not task or run.get("task") == task:
+            found.append((name, path, run))
+    return found
+
+
+def _judge_total(path, run, key, letter):
+    """A build's total for this run: the mean across judges who scored it completely."""
+    totals = []
+    for judge in run.get("judges", []):
+        data = _judge_scores(path, judge, key)["data"] or {}
+        scores = data.get("builds", {}).get(letter)
+        if isinstance(scores, dict) and all(_valid_score(scores.get(c)) for c in CRITERIA):
+            totals.append(sum(scores[c] for c in CRITERIA))
+    return sum(totals) / len(totals) if totals else None
+
+
+def _spread(values):
+    if not values:
+        return "–"
+    mean = _f(sum(values) / len(values))
+    return mean if len(values) == 1 else "%s (%s–%s)" % (mean, _f(min(values)), _f(max(values)))
+
+
+def cmd_compare(cfg, args):
+    runs = _finished_runs(cfg, args.task)
+    if not runs:
+        say("\nNo finished runs to compare%s.\n" % (" for task '%s'" % args.task if args.task else ""))
+        return
+    log = {}
+    for rec in _read_log(cfg):
+        log.setdefault((rec.get("run_id"), rec.get("stage")), []).append(rec)
+
+    # Different tests, prompts, scoring or agent mean different results, so these never share a table.
+    groups = {}
+    for name, path, run in runs:
+        hashes = run.get("hashes") or {}
+        agent = (run.get("agent") or {}).get("command")
+        mode = shlex.join(agent) if agent and _read_stage_results(path) else "manual"
+        group = groups.setdefault((run.get("task"), hashes.get("task"), hashes.get("prompts"),
+                                   hashes.get("scoring"), mode), {"runs": 0, "models": {}})
+        group["runs"] += 1
+        key = read_blind_key(path) or {"builds": {}}
+        letter_of = {label: letter for letter, label in key["builds"].items()}
+        try:
+            with open(os.path.join(path, "tests", "summary.json"), encoding="utf-8") as fh:
+                tests = json.load(fh)
+        except (OSError, ValueError):
+            tests = {}
+        for label, res in tests.items():
+            model = group["models"].setdefault(label, {"passed": [], "expected": None, "failed": 0, "judged": [], "speed": []})
+            model["passed"].append(res.get("passed") or 0)
+            model["expected"] = res.get("expected") or model["expected"]
+            model["failed"] += 1 if res.get("no_build") else 0
+            total = _judge_total(path, run, key, letter_of[label]) if label in letter_of else None
+            if total is not None:
+                model["judged"].append(total)
+            speed = _generation_speed(log.get((run.get("run_id", name), "build-" + label), []))
+            if speed is not None:
+                model["speed"].append(speed)
+
+    lines = ["# Comparing %d finished run(s)" % len(runs), ""]
+    if len(groups) > 1:
+        lines += ["These runs differ in their task, prompts, scoring or agent, so they are not averaged together.", ""]
+    for (task, task_hash, prompts, scoring, mode), group in groups.items():
+        lines += ["## `%s`: %d run(s)" % (task, group["runs"]), "",
+                  "Mode: `%s` · Task hash: %s · Prompts hash: %s · Scoring hash: %s" % (
+                      mode, task_hash or "–", prompts or "–", scoring or "–"), "",
+                  "| Model | Runs | Failed builds | Hidden tests passed | Judged runs | Judge total, of 25 | Generation speed |",
+                  "|---|---|---|---|---|---|---|"]
+        for label, model in sorted(group["models"].items()):
+            tests_text = _spread(model["passed"])
+            if model["expected"]:
+                tests_text += " of %d" % model["expected"]
+            lines.append("| %s | %d | %d | %s | %d | %s | %s tok/s |" % (
+                label, len(model["passed"]), model["failed"], tests_text, len(model["judged"]),
+                _spread(model["judged"]), _f(_median(model["speed"]))))
+        lines.append("")
+    lines += ["Values are the mean, with the lowest and highest in brackets. A failed build counts as 0 tests passed. "
+              "Speed is the median across runs."]
+    if any(len(model["passed"]) < 5 for group in groups.values() for model in group["models"].values()):
+        lines += ["", "**Some models have fewer than 5 runs here, so small differences may be chance.**"]
+    text = "\n".join(lines) + "\n"
+    say("\n" + text)
+    results = resolve_dir(cfg.get("results_dir", "results"))
+    os.makedirs(results, exist_ok=True)
+    saved = os.path.join(results, "compare-%s.md" % (args.task or "all"))
+    with open(saved, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    say("Saved in: %s\n" % saved)
 
 
 # ----------------------------------------------------------------- unattended runs
@@ -2446,6 +2689,8 @@ def _run_steps(cfg, args, run_id, path, run, agent):
 
 def cmd_run(cfg, args):
     global UNATTENDED
+    if args.repeat < 1:
+        die("--repeat needs a number of 1 or more.")
     agent = cfg.get("agent")
     root = runs_root(cfg)
     os.makedirs(root, exist_ok=True)
@@ -2484,16 +2729,30 @@ def cmd_run(cfg, args):
     try:
         if not args.allow_sleep:
             holder = _keep_awake()
-        if resume:
-            say("\nResuming run %s. To start fresh instead:  %s new-run, then  %s run" % (resume, CMD, CMD))
-        else:
-            cmd_new_run(cfg, args)
-        run_id, path, run = current_run(cfg)
-        if not run.get("agent"):
-            run["agent"] = agent
-            with open(os.path.join(path, "run.json"), "w", encoding="utf-8") as fh:
-                json.dump(run, fh, indent=2)
-        code = _run_steps(cfg, args, run_id, path, run, agent)
+        codes = []
+        for number in range(1, args.repeat + 1):
+            if args.repeat > 1:
+                say("\n=== Run %d of %d ===" % (number, args.repeat))
+            if resume and number == 1:
+                say("\nResuming run %s. To start fresh instead:  %s new-run, then  %s run" % (resume, CMD, CMD))
+            else:
+                cmd_new_run(cfg, args)
+            run_id, path, run = current_run(cfg)
+            if "agent_version" not in run:
+                run["agent"] = run.get("agent") or agent
+                run["agent_version"] = agent_version(run["agent"]["command"])
+                with open(os.path.join(path, "run.json"), "w", encoding="utf-8") as fh:
+                    json.dump(run, fh, indent=2)
+            try:
+                codes.append(_run_steps(cfg, args, run_id, path, run, run["agent"]))
+            except SystemExit as exc:
+                if args.repeat == 1:
+                    raise
+                codes.append(exc.code if isinstance(exc.code, int) and exc.code else 1)
+                warn("Run %d of %d stopped early. Carrying on with the next one." % (number, args.repeat))
+        code = max(codes)
+        if args.repeat > 1:
+            cmd_compare(cfg, argparse.Namespace(task=run["task"]))
     except KeyboardInterrupt:
         say("\nStopped. Run '%s run' to resume; the unfinished stage starts again, and the report counts "
             "that as another attempt.\n" % CMD)
@@ -2518,13 +2777,14 @@ def main():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--allow-sleep", action="store_true")
+    parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()
 
     commands = {
         "check": cmd_check, "models": cmd_models, "new-run": cmd_new_run, "next": cmd_next,
         "start": cmd_start, "status": cmd_status, "load": cmd_load, "smoke": cmd_smoke,
         "freeze": cmd_freeze, "test": cmd_test, "blind": cmd_blind, "packet": cmd_packet,
-        "judge": cmd_judge, "report": cmd_report, "run": cmd_run,
+        "judge": cmd_judge, "report": cmd_report, "run": cmd_run, "compare": cmd_compare,
     }
     if args.command == "init":
         try:

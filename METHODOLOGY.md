@@ -124,6 +124,7 @@ produced.
 | Model in memory (LM Studio) | Everything is unloaded before each load, so only one model is in memory at a time |
 | Context length (LM Studio) | Set by the harness on every load. On other servers it is **not** controlled, and the report says so. |
 | Agent | Same name and URL for every stage. Its settings are yours to keep fixed; see below. |
+| Temperature and output limit | Whatever the agent sends, which the report shows. `request_overrides` can pin them for every call. |
 | Workspace | A fresh folder and a new agent session per stage |
 | Judges | A new chat per judge per run. Same judge prompt and scoring sheet. |
 
@@ -149,7 +150,8 @@ column shows it. Treat such a stage's numbers with care.
 
 **Sample size and chance.** Models are nondeterministic, and one run is one sample. A difference of
 a few tests or points in a single run may be chance. Repeat runs before you believe a small gap, and
-don't treat a report as a ranking. relaybench has no statistics across runs.
+don't treat a report as a ranking. `run --repeat` and `compare` show the mean and spread across runs,
+and keep runs with different tasks, prompts, scoring or agents apart. They don't test for significance.
 
 **The task set is small and Python-centred.** Three tasks can't describe a model. All are small,
 self-contained Python packages with a clear spec, which favours models good at exactly that. Long
@@ -189,6 +191,11 @@ stronger isolation, set `runs_dir` outside this repo and run agents in a contain
   Re-judge an old packet to check.
 - Judges also see the hidden test results first, which likely anchors their other scores. That is
   deliberate for correctness, and a real bias for code quality.
+- Reviews can colour a judge's view of a build. Builds and reviews are scored separately, reviews come
+  after all the builds in the packet, and judges are told to score the builds first. That reduces the
+  effect but can't remove it, because a judge reads the whole packet. Runs without reviewers avoid it.
+- Judges see each build's own test results, run by the harness. Passing tests can still be trivial, so
+  this is evidence about the tests, not a score.
 - The scoring scales are subjective, and the average of a few judges isn't a precise instrument.
 - Very large packets may not fit a judge's context, and it may not say so.
 
@@ -218,8 +225,8 @@ agent, which shows the harness works, not that any particular model or agent doe
 
 relaybench is a measurement tool, not a sandbox.
 
-- **Model-written code runs on your machine with your privileges**, both through the agent's commands
-  and when hidden tests import a build. The temporary copy protects the results, not your system.
+- **Model-written code runs on your machine with your privileges**, through the agent's commands, when
+  hidden tests import a build, and when the harness runs a build's own tests. The temporary copy protects the results, not your system.
 - Prefer an agent that asks before running commands, and consider a container or a VM, especially for
   models from sources you don't fully trust.
 - **`run` removes the person from the loop.** The agent has to auto-approve, so anything a model decides to

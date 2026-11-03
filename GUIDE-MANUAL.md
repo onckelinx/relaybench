@@ -175,7 +175,7 @@ Connect the agent to the proxy, not to the server. In Cline, open **Settings**:
 | **API Key** | anything; the field just can't be empty |
 | **Model ID** | `local-model` |
 | **Context Window Size** | the same as `backend.context_length` in `pipeline.json` |
-| **Max Output Tokens** | one fixed value for every stage, such as `16384` |
+| **Max Output Tokens** | one fixed value for every stage, such as `16384`. To enforce it for any agent, see [Pinning model settings](GUIDE-UNATTENDED.md#pinning-model-settings). |
 | **Temperature** | leave empty if allowed, so each model uses its own default. Some models loop at temperature 0; check their model cards. |
 
 Exact labels vary by version. Also consider:
@@ -295,8 +295,9 @@ Getting stuck is a real finding about the model, not a failure of the test.
 python pipeline.py test
 ```
 
-The scores stay hidden so you stay blind. It warns you if a build timed out or lost tests. To see the
-numbers anyway, use `test --show`. Full output is in the run's `tests` folder.
+This also runs each build's own tests, on a copy, so that judges can see whether they pass. The scores stay
+hidden so you stay blind. It warns you if a build timed out or lost tests. To see the numbers anyway, use
+`test --show`. Full output is in the run's `tests` folder.
 
 ### 6. Anonymise the builds
 
@@ -324,8 +325,8 @@ Open the printed folder, new session, `Follow the instructions in PROMPT.md`, an
 python pipeline.py packet
 ```
 
-This writes `4-judging/judge-packet.md` with the task, the plan, every build with its test results,
-and every review, labelled only by letter. Then, for each judge:
+This writes `4-judging/judge-packet.md` with the task, the plan, every build with its test results and
+numbered code, and then every review, labelled only by letter. Then, for each judge:
 
 - **`api` judges:** run `python pipeline.py judge`. It sends the packet and saves each answer.
 - **`paste` judges:** start a **new** chat with the judge, using the same model every run. Attach the
@@ -357,6 +358,9 @@ your hardware and agent settings, and run `report` again. It keeps your notes an
 
 **Run again.** There is nothing to reset: `python pipeline.py new-run` makes a new folder. Old runs
 stay in `runs/` until you delete them.
+
+**Compare runs.** `python pipeline.py compare` shows each model's tests, judge totals and speed across finished
+runs. Runs with a different task version, prompts, scoring sheet or agent go in separate tables.
 
 **Redo one stage.** `python pipeline.py start <stage>`, for example `start build-<label>`. `status`
 and the error message list stage names. The report counts how often each stage was started.
@@ -480,6 +484,7 @@ python pipeline.py blind      # before the reviews
 python pipeline.py packet     # after the reviews
 python pipeline.py judge      # call the api judges
 python pipeline.py report     # after the judges
+python pipeline.py compare    # across finished runs
 ```
 
 In each stage folder: new agent session → `Follow the instructions in PROMPT.md`.

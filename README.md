@@ -121,8 +121,8 @@ the rest of the run carries on.
 - **Scores from different agents don't compare directly**, so compare runs made the same way. The report
   records the mode and the agent command. Keep API keys out of the command, since the report shows it.
 - **Status:** one real run so far: the toy task with Cline's CLI 3.0.74 and LM Studio on macOS, with `paste`
-  judges and no failed stages. Failure handling, `api` judges and other agents have only been tested with a
-  scripted stand-in.
+  judges and no failed stages. Failure handling, `api` judges, other agents, `--repeat`, `compare` and pinned
+  settings have only been tested with a scripted stand-in.
 
 [GUIDE-UNATTENDED.md](GUIDE-UNATTENDED.md) goes through it step by step, including failure handling and
 [what to do about sleep and lids](GUIDE-UNATTENDED.md#keeping-the-machine-awake).
@@ -143,7 +143,8 @@ the rest of the run carries on.
 | `packet` | Creates the judge packet |
 | `judge [--force]` | Sends the packet to `api` judges |
 | `report` | Collects speed, tests, scores and integrity flags into `REPORT.md` |
-| `run [--task name] [--allow-sleep]` | Does all of the above unattended, or resumes an unfinished run |
+| `run [--task name] [--repeat n] [--allow-sleep]` | Does all of the above unattended, or resumes an unfinished run. `--repeat` does several runs in a row. |
+| `compare [--task name]` | Compares finished runs per model: tests, judge totals and speed, across runs |
 | `start <stage>` | (Re)starts one stage |
 | `load <label>`, `smoke [label]` | Switches to a model by hand; sends it a test message |
 
@@ -165,7 +166,8 @@ to a `_stale-<time>` folder. `judge --force` asks the `api` judges again and rep
 | `served_model_name` | The one model name your agent uses | `local-model` |
 | `runs_dir`, `logs_dir`, `results_dir`, `tasks_dir` | Folders; relative to this repo, or absolute | `runs`, `logs`, `results`, `tasks` |
 | `task` | Default task | |
-| `test_timeout_s` | Limit for one build's hidden test suite | `600` |
+| `test_timeout_s` | Limit for one build's hidden tests, and for its own tests | `600` |
+| `request_overrides` | Pins `temperature` and `max_tokens` for every model call. See [Pinning settings](GUIDE-UNATTENDED.md#pinning-model-settings). | none |
 | `planner` | One `{label, model}` | |
 | `builders` | One or more `{label, model}` | |
 | `reviewers` | Zero or more `{label, model}` | |

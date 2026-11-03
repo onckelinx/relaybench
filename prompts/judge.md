@@ -9,12 +9,16 @@ This packet contains, in order:
 3. The **plan** every developer was asked to follow (written by an AI planner).
 4. One or more **anonymous builds** (Build A, Build B, …) made from that same plan,
    each with the results of hidden acceptance tests the developers never saw.
-5. **Code reviews** of each build, if any, written by anonymous AI reviewers
-   (reviewer-1, reviewer-2, …).
+5. **Code reviews** of each build, if any, after all the builds, written by anonymous AI
+   reviewers (reviewer-1, reviewer-2, …).
+
+Code is shown with line numbers, as `12 | code`. The numbers are not part of the files.
 
 What to do:
 
 - Score every build and every review with the scoring sheet.
+- Score the builds first, from their code and test results. A poor review must not lower a
+  build's score, and a review's claim about a build only counts once you have checked it.
 - Be strict and specific. Point to file names and line numbers.
 - Judge the code, not its length or formatting. Longer is not better.
 - Do not speculate about which AI model produced which build or review.

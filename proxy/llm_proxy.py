@@ -12,13 +12,14 @@ Which run and stage a call belongs to is read from <logs_dir>/current-stage.json
 which `pipeline.py next` / `start` / `load` write. A request path that starts
 with /run/<run-id>/<stage>/ overrides that (used by the smoke test).
 
-Requests are forwarded unchanged, with three exceptions:
+Requests are forwarded unchanged, with four exceptions:
 
   * When the current stage names a `model_id` (servers without a load step), the
     request's `model` is rewritten to it, and GET /v1/models lists only the alias.
   * Streaming chat requests get `stream_options.include_usage`, so token counts
     come from the server instead of being estimated from chunks.
   * If backend.api_key_env is set, that key replaces the agent's Authorization.
+  * Settings in the config's `request_overrides` replace what the agent sent.
 
 The proxy also keeps <logs_dir>/proxy-activity.json current: a change counter and
 the number of calls in flight. `pipeline.py run` uses it to tell a slow model from
@@ -264,12 +265,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         match = PREFIX_RE.match(self.path)
         if match:
             run_id, stage, rest = match.group(1), match.group(2), match.group(3) or "/"
-            stage_model, model_id, sentinels = None, None, []
+            stage_model, model_id, sentinels, overrides = None, None, [], {}
         else:
             run_id, stage, rest = stage_info.get("run_id", "-"), stage_info.get("stage", "-"), self.path
             stage_model = stage_info.get("model")
             model_id = stage_info.get("model_id")
             sentinels = stage_info.get("sentinels") or []
+            overrides = stage_info.get("overrides") or {}
 
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
@@ -288,7 +290,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             text = body.decode("utf-8", "replace")
             hits = [s for s in sentinels if s in text]
 
-        model, wants_stream, temperature, max_tokens = None, False, None, None
+        model, wants_stream, temperature, max_tokens, pinned = None, False, None, None, []
         if body:
             try:
                 req = json.loads(body)
@@ -297,6 +299,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 temperature = req.get("temperature")
                 max_tokens = req.get("max_tokens", req.get("max_completion_tokens"))
                 changed = False
+                if is_model_call and overrides:
+                    req.update(overrides)
+                    if "max_tokens" in overrides:
+                        req.pop("max_completion_tokens", None)
+                    temperature, max_tokens = req.get("temperature"), req.get("max_tokens", max_tokens)
+                    pinned = sorted(overrides)
+                    changed = True
                 if is_model_call and model_id and "model" in req:
                     req["model"] = model_id
                     changed = True
@@ -332,6 +341,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "stream": wants_stream,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "pinned": pinned,
             "status": None,
             "input_tokens": None,
             "output_tokens": None,

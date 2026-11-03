@@ -437,6 +437,7 @@ def test_lmstudio_mode_loads_under_alias(make_stack, tmp_path):
     assert "Smoke test passed" in stack.cli("smoke")
 
     stack.through_tests()
+    assert stack.json_in_run("run.json")["model_details"] == {"mock-good": "mlx 4bit"}
     stack.cli("blind")
     stack.review_all()
     stack.cli("packet")
@@ -643,6 +644,122 @@ def test_isdigit_bug_is_caught(make_stack, task):
     with open(os.path.join(FIXTURES, task, "variants.json"), encoding="utf-8") as fh:
         must_fail = json.load(fh)["isdigit"]["must_fail"]
     assert sorted(summary["mock-isdigit"]["failing"]) == sorted(must_fail)
+
+
+def test_non_ascii_digits_in_the_delimited_format_are_caught(make_stack):
+    """int() reads these digits, so a `\\d` regex accepts them. Plain-format tests alone can't see that."""
+    stack = make_stack(["mock-planner", "mock-good", "mock-udigits", "mock-reviewer"])
+    stack.write_config(builders=[{"label": "mock-good", "model": "mock-good"},
+                                 {"label": "mock-udigits", "model": "mock-udigits"}])
+    stack.start_proxy()
+    stack.through_tests()
+    summary = stack.summary()
+    assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    with open(os.path.join(FIXTURES, "toy-bepay", "variants.json"), encoding="utf-8") as fh:
+        must_fail = json.load(fh)["udigits"]["must_fail"]
+    assert sorted(summary["mock-udigits"]["failing"]) == sorted(must_fail)
+
+
+def test_packet_numbers_lines_and_keeps_reviews_after_the_builds(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
+    stack.write_config()
+    stack.start_proxy()
+    stack.plan()
+    stack.build_all()
+    with open(os.path.join(stack.run_dir(), "2-build-1", "leading_blank.py"), "w", encoding="utf-8") as fh:
+        fh.write("\n\nlate_line = 1\n")
+    stack.cli("test")
+    stack.cli("blind")
+    stack.review_all()
+    # Moving reviews must not stop the label search from covering them, or from naming the right build.
+    with open(os.path.join(stack.run_dir(), "3-review-B-by-reviewer-1", "REVIEW.md"), "a", encoding="utf-8") as fh:
+        fh.write("\nThis looks like the work of mock-good.\n")
+    out = stack.cli("packet")
+    assert "sections of Build B mention a model label" in out
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert re.search(r"^ *1 \| import re$", packet, re.MULTILINE)
+    assert re.search(r"^3 \| late_line = 1$", packet, re.MULTILINE), "numbers must match the file, blank lines included"
+    last_build = max(m.start() for m in re.finditer(r"^# Build ", packet, re.MULTILINE))
+    reviews = packet.index("\n# Reviews\n")
+    assert last_build < reviews < packet.index("## Review A/reviewer-1")
+    assert packet.count("## Review ") == 2
+
+
+def test_own_tests_are_run_and_shown(make_stack):
+    labels = ["mock-good-mixed", "mock-good-none", "mock-good-hang", "mock-good-broken"]
+    stack = make_stack(["mock-planner", "mock-reviewer"] + labels)
+    stack.write_config(builders=[{"label": l, "model": l} for l in labels], test_timeout_s=30)
+    stack.start_proxy()
+    stack.plan()
+    stack.build_all()
+    tests = {"2-build-1": "def test_ok():\n    open('left_behind.txt', 'w').close()\n\ndef test_bad():\n    assert False\n",
+             "2-build-3": "import time\n\ndef test_hangs():\n    time.sleep(600)\n",
+             "2-build-4": "import no_such_module_here\n\ndef test_x():\n    pass\n"}
+    for folder, source in tests.items():
+        with open(os.path.join(stack.run_dir(), folder, "test_own.py"), "w", encoding="utf-8") as fh:
+            fh.write(source)
+    # The layout real builds use: a tests folder that imports the package from the project's root.
+    os.makedirs(os.path.join(stack.run_dir(), "2-build-1", "tests"))
+    with open(os.path.join(stack.run_dir(), "2-build-1", "tests", "test_package.py"), "w", encoding="utf-8") as fh:
+        fh.write("import unittest\nimport bepay\n\n\nclass Own(unittest.TestCase):\n    def test_it(self):\n"
+                 "        self.assertTrue(bepay.is_valid_ogm('+++123/4567/89002+++'))\n")
+    stack.cli("test")
+    summary = stack.summary()
+    for label in labels:
+        assert summary[label]["passed"] == HIDDEN_COUNTS["toy-bepay"], "own tests must not affect hidden results"
+    assert summary["mock-good-mixed"]["own_tests"]["passed"] == 2 and summary["mock-good-mixed"]["own_tests"]["ran"] == 3
+    assert summary["mock-good-none"]["own_tests"]["ran"] == 0
+    assert summary["mock-good-hang"]["own_tests"]["timeout"] is True
+    assert summary["mock-good-broken"]["own_tests"]["collection_error"] is True
+    leftovers = os.listdir(os.path.join(stack.run_dir(), "2-build-1"))
+    assert "left_behind.txt" not in leftovers, "they must run on a copy"
+    assert ".pytest_cache" not in leftovers and "__pycache__" not in leftovers
+
+    stack.cli("blind")
+    stack.review_all()
+    stack.cli("packet")
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    for text in ("2 of 3 passed", "none found", "timed out", "could not be collected"):
+        assert "own tests: **%s**." % text in packet, text
+    assert "`test_own.test_bad`" in packet
+    fill_human_scores(os.path.join(stack.run_dir(), "4-judging", "scores-judge-human.md"))
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "| Own tests |" in report and re.search(r"\| mock-good-mixed \| 41 of 41 \| 2 of 3 passed \|", report)
+
+
+def test_request_overrides_pin_settings_for_every_model_call(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
+    stack.write_config(request_overrides={"max_tokens": 1234, "temperature": 0.5})
+    stack.start_proxy()
+    stack.plan()
+    # The run's snapshot decides, as with every other setting.
+    cfg = stack.load_config()
+    del cfg["request_overrides"]
+    stack.save_config(cfg)
+    stack.build_all()
+    calls = [r for r in stack.requests() if "chat" in r["path"]]
+    assert calls and all(r["max_tokens"] == 1234 and r["temperature"] == 0.5 for r in calls)
+    stack.cli("test")
+    stack.cli("blind")
+    stack.review_all()
+    stack.cli("packet")
+    fill_human_scores(os.path.join(stack.run_dir(), "4-judging", "scores-judge-human.md"))
+    stack.cli("report")
+    assert "| 0.5 (pinned) | 1234 (pinned) |" in stack.text_in_run("REPORT.md")
+
+
+def test_without_overrides_requests_are_unchanged_and_bad_ones_are_refused(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
+    stack.write_config()
+    stack.start_proxy()
+    stack.plan()
+    calls = [r for r in stack.requests() if "chat" in r["path"]]
+    assert calls and all(r["max_tokens"] == 16384 and r["temperature"] == 0.2 for r in calls)  # what the agent sent
+    for bad, word in (({"seed": 1}, "only hold"), ({"max_tokens": 0}, "max_tokens"), ({"max_tokens": 1.5}, "max_tokens"),
+                      ({"temperature": "hot"}, "temperature"), ({"temperature": -1}, "temperature"), ("x", "only hold")):
+        stack.write_config(request_overrides=bad)
+        assert word in stack.cli("status", expect=1), bad
 
 
 def test_build_hanging_on_import_times_out_without_stalling(make_stack):
@@ -1019,6 +1136,9 @@ def test_run_goes_from_nothing_to_a_report(make_stack):
 
     report = stack.text_in_run("REPORT.md")
     assert "Mode: unattended, with `%s`" % shlex.join([sys.executable, AGENT]) in report
+    assert "- Hardware: " in report and "- Quantisation: not reported" in report
+    assert "- Agent version: Python " in report  # this agent's command starts with the Python it runs in
+    assert "- Limits: stage 3600 s, idle 600 s, hidden tests 120 s" in report
     assert "## Unattended stages" in report and "Canned verdict" in report
     summary = stack.summary()
     assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
@@ -1143,7 +1263,7 @@ def test_run_records_each_kind_of_stage_failure(make_stack):
     assert packet.count("(No review was written.)") == 4 and "from_another_model" not in packet
 
     report = stack.text_in_run("REPORT.md")
-    assert "| – | mock-nothing | 0 of %d (no build: the agent failed) |" % full in report
+    assert "| – | mock-nothing | 0 of %d (no build: the agent failed) | – | – |" % full in report
     assert "Build – (mock-nothing)" in report
     assert "6 stage(s) failed" in out
     assert "(FAILED)" in stack.cli("status")
@@ -1279,6 +1399,93 @@ def test_run_refuses_while_an_orphaned_agent_is_working(make_stack):
         os.kill(proxy_pid, signal.SIGKILL)
 
 
+def test_repeat_then_compare(make_stack):
+    stack = unattended(make_stack)
+    out = stack.cli("run", "--allow-sleep", "--repeat", "2")
+    assert "=== Run 2 of 2 ===" in out and "# Comparing 2 finished run(s)" in out
+    folders = [n for n in os.listdir(stack.runs) if n.endswith("toy-bepay") or "toy-bepay-" in n]
+    assert len(folders) == 2 and all(os.path.exists(os.path.join(stack.runs, n, "REPORT.md")) for n in folders)
+    assert not proxy_is_up(stack) and not os.path.exists(os.path.join(stack.runs, "run.pid"))
+    assert re.search(r"\| mock-good \| 2 \| 0 \| 41\.0 \(41\.0–41\.0\) of 41 \| 2 \| \d+\.\d \(", out)
+    assert "fewer than 5 runs" in out
+    with open(os.path.join(stack.tmp, "results", "compare-toy-bepay.md"), encoding="utf-8") as fh:
+        assert "| mock-buggy | 2 |" in fh.read()
+
+    # Different tests, prompts, scoring or agent mean different results: never in one average.
+    first = os.path.join(stack.runs, sorted(folders)[0], "run.json")
+    with open(first, encoding="utf-8") as fh:
+        original = fh.read()
+
+    def changes(change):
+        run = json.loads(original)
+        change(run)
+        with open(first, "w", encoding="utf-8") as fh:
+            json.dump(run, fh)
+        out = stack.cli("compare")
+        assert "not averaged together" in out and out.count("## `toy-bepay`: 1 run(s)") == 2
+        assert "| mock-good | 2 |" not in out
+
+    for field in ("task", "prompts", "scoring"):
+        changes(lambda run: run["hashes"].update({field: "something-else"}))
+    changes(lambda run: run["agent"].update({"command": ["another-agent"]}))
+    run = json.loads(original)
+
+    # A run from an older version, without what newer runs record, still loads.
+    for name in ("machine", "hashes", "agent", "model_details", "test_timeout_s", "request_overrides", "agent_version"):
+        run.pop(name, None)
+    with open(first, "w", encoding="utf-8") as fh:
+        json.dump(run, fh)
+    assert "| mock-good | 1 |" in stack.cli("compare")
+    assert "No finished runs to compare for task 'cron-next'" in stack.cli("compare", "--task", "cron-next")
+
+
+def test_old_run_folder_still_reports(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    path = os.path.join(stack.run_dir(), "run.json")
+    with open(path, encoding="utf-8") as fh:
+        run = json.load(fh)
+    for name in ("machine", "model_details", "test_timeout_s", "request_overrides", "agent_version"):
+        run.pop(name, None)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(run, fh)
+    summary = stack.summary()
+    for res in summary.values():
+        res.pop("own_tests", None)
+    with open(os.path.join(stack.run_dir(), "tests", "summary.json"), "w", encoding="utf-8") as fh:
+        json.dump(summary, fh)
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "- Hardware: not reported" in report and "- Agent version: not reported" in report
+    assert "hidden tests ? s" in report
+
+
+def test_compare_counts_failed_builds_and_skips_unfinished_runs(make_stack):
+    stack = unattended(make_stack, "2-build-1:nothing", reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    assert "| mock-good | 1 | 1 | 0.0 of 41 | 0 | – |" in stack.cli("compare")
+    stack.cli("new-run")  # no report yet, so it may still be blind
+    assert "# Comparing 1 finished run(s)" in stack.cli("compare")
+
+
+def test_repeat_carries_on_after_a_failed_plan(make_stack):
+    stack = unattended(make_stack, "1-plan:nothing", reviewers=[], judges=[])
+    out = stack.cli("run", "--allow-sleep", "--repeat", "2", expect=1)
+    assert "=== Run 2 of 2 ===" in out and "Carrying on with the next one" in out
+    assert "No finished runs" in out
+    assert "needs a number" in stack.cli("run", "--allow-sleep", "--repeat", "0", expect=1)
+
+
+def test_one_model_can_be_built_twice_from_the_same_plan(make_stack):
+    stack = unattended(make_stack, builders=[{"label": "good-a", "model": "mock-good"},
+                                             {"label": "good-b", "model": "mock-good"}], reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    summary = stack.summary()
+    assert summary["good-a"]["passed"] == summary["good-b"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    out = stack.cli("compare")
+    assert "| good-a | 1 |" in out and "| good-b | 1 |" in out
+
+
 def test_run_checks_before_it_starts(make_stack):
     stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
     wait_for_http(stack.mock_url + "/v1/models")
@@ -1376,6 +1583,42 @@ def test_macos_keep_awake_arguments(tmp_path, monkeypatch):
     assert wait_until(lambda: record.read_text().strip() == "-is -w %d" % os.getpid())
     module._release_awake(holder)
     assert holder.poll() is not None
+
+
+def test_agent_version_cannot_stall_a_run(tmp_path):
+    module = load_pipeline_module()
+    script = tmp_path / "agent"
+    script.write_text("#!/bin/sh\necho\necho my-agent 1.2.3\n")
+    script.chmod(0o755)
+    assert module.agent_version([str(script), "--other"]) == "my-agent 1.2.3"
+    # Something it leaves running in the background keeps the output open, and must not matter.
+    script.write_text("#!/bin/sh\nsleep 30 &\necho my-agent 1.2.3\n")
+    started = time.time()
+    assert module.agent_version([str(script)], timeout=5) == "my-agent 1.2.3"
+    script.write_text("#!/bin/sh\nexec sleep 30\n")
+    assert module.agent_version([str(script)], timeout=1) is None
+    assert time.time() - started < 10
+    assert module.agent_version(["no-such-agent-here"]) is None
+
+
+def test_machine_info_is_best_effort(monkeypatch):
+    module = load_pipeline_module()
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    answers = {"machdep.cpu.brand_string": "Apple M5 Max\n", "hw.memsize": "137438953472\n"}
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, **kw: Result(answers[cmd[-1]]))
+    assert module.machine_info() == {"cpu": "Apple M5 Max", "memory_gb": 128}
+
+    def missing(cmd, **kw):
+        raise OSError("no sysctl")
+    monkeypatch.setattr(module.subprocess, "run", missing)
+    assert module.machine_info() == {"cpu": None, "memory_gb": None}
+    monkeypatch.setattr(module.platform, "system", lambda: "Windows")
+    assert module.machine_info() == {"cpu": None, "memory_gb": None}
 
 
 def test_stage_clock_does_not_count_sleep():

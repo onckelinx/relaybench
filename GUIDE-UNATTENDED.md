@@ -11,8 +11,8 @@ To drive each stage yourself in an editor instead, use the [manual guide](GUIDE-
   privileges, for as long as the run lasts. Use a [container](#using-a-container) or a VM if that matters
   to you, and read [Security](METHODOLOGY.md#security).
 - **Status:** `run` has had one real run so far: the toy task with Cline's CLI 3.0.74 and LM Studio on
-  macOS, with `paste` judges and no failed stages. Failure handling, `api` judges and other agents have only
-  been tested with a scripted stand-in, so check your first run closely.
+  macOS, with `paste` judges and no failed stages. Failure handling, `api` judges, other agents, `--repeat`,
+  `compare` and pinned settings have only been tested with a scripted stand-in, so check your first run closely.
 - **Windows** has never been tested.
 
 ## What you need
@@ -245,6 +245,8 @@ python pipeline.py report
   shows anything that went wrong. See [When a stage goes wrong](#when-a-stage-goes-wrong).
 - **Attempts:** above 1 means a stage restarted after an interruption, so treat its numbers with care.
 - **Integrity flags:** whether a model may have seen something it shouldn't have.
+- **The top of the report:** hardware, agent version and quantisation are filled in where the system says.
+  `not reported` means it couldn't tell, so add those under *My notes*.
 - **My notes:** add your hardware, power setup and agent version, then run `python pipeline.py report`
   again. It keeps your notes.
 
@@ -270,7 +272,36 @@ offers to keep your agent, so you can press Enter at that question.
 scores directly with manual runs, because a command-line agent can behave differently from an editor one.
 In our real run, for example, Cline's CLI sent no temperature or output limit, so each model used its
 defaults, while the manual guide sets a fixed output limit. The report records the mode and command you
-used, and *Settings the agent sent* shows what reached the models.
+used, and *Settings sent to the model* shows what reached the models. To make those the same, see
+[Pinning model settings](#pinning-model-settings).
+
+## Several runs in a row
+
+One run is one sample, and models are nondeterministic, so a small difference can be chance. To do several
+complete runs, each with its own new plan, and compare them at the end:
+
+```bash
+python pipeline.py run --task toy-bepay --repeat 3
+```
+
+If a run is unfinished, it's resumed and counts as the first of the three. To compare finished runs at any
+time:
+
+```bash
+python pipeline.py compare --task toy-bepay
+```
+
+For each model, this shows the runs, failed builds, hidden tests passed, judge totals and speed, and saves
+the table in `results/`. A failed build counts as 0 tests passed. Runs with a different task version, prompts,
+scoring sheet or agent go in separate tables, because their results don't compare.
+
+- **Judges:** with `paste` judges, each run waits for two more chats from you, so judging many runs by hand
+  is a lot of copying. `api` judges suit this better. Without judges, you still get tests and speed for every
+  run, and any you judge later show up in `compare`.
+- **Time:** multiply. A toy run often takes 30–60 minutes.
+- **The same plan for several builds:** to measure one model against itself with the planner held still,
+  list it twice under `builders` in `pipeline.json`, with a different `label` each time. `init` can't do this,
+  so it's a hand edit.
 
 ---
 
@@ -328,6 +359,24 @@ In `command`, `{base_url}`, `{model}` and `{folder}` are filled in for you. The 
 shell doesn't reach an agent under test.
 
 **Keep API keys out of `command`**, because the report prints it.
+
+## Pinning model settings
+
+The report's *Settings sent to the model* table shows what each stage's calls asked for. Cline's CLI sent no
+temperature or output limit in our real run, so each model used its own defaults. To make them the same for
+every model, add this to the top level of `pipeline.json`:
+
+```json
+"request_overrides": { "max_tokens": 16384 },
+```
+
+The proxy then replaces whatever the agent sends, on every model call, and the report marks those values as
+*pinned*. It only takes `temperature` and `max_tokens`. A new run picks up a change; a run in progress keeps
+what it started with.
+
+- **`max_tokens`** is the useful one: too low cuts answers off, so choose a generous value.
+- **`temperature`** is usually better left out, so that each model uses its own default. Some models loop at
+  a temperature of 0, so check their model cards before pinning it.
 
 ## Other agents
 
@@ -420,6 +469,7 @@ powercfg /change hibernate-timeout-ac 0
 |---|---|
 | `pip: command not found` or `python: command not found` | Activate the environment: `source .venv/bin/activate`, from the `relaybench` folder. |
 | `pipeline.json not found` | Run `python pipeline.py init`, from the `relaybench` folder. |
+| `request_overrides can only hold ...` | See [Pinning model settings](#pinning-model-settings). |
 | `pipeline.json is not valid JSON` | A hand edit left out a comma or quote. The message gives a line number. Or run `init` again. |
 | `Unattended runs need a command-line agent` | Run `python pipeline.py init` again, and choose an agent. |
 | `The agent command ... was not found` | The agent isn't installed, or isn't on your `PATH`. Try the first word of `command` by itself. |

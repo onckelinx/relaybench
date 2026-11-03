@@ -16,6 +16,7 @@
   "proxy_port": 1235,
   "served_model_name": "local-model",
   "test_timeout_s": 600,
+  "request_overrides": {},
 
   "agent": {
     "command": ["my-agent", "--some-auto-approve-flag", "Follow the instructions in PROMPT.md"],

@@ -25,5 +25,17 @@
       "TestOgmValidation.test_non_ascii_digits_are_invalid",
       "TestCli.test_non_ascii_digits_print_invalid"
     ]
+  },
+  "udigits": {
+    "edits": [
+      {
+        "file": "bepay/validators.py",
+        "find": "r\"\\+\\+\\+([0-9]{3})/([0-9]{4})/([0-9]{5})\\+\\+\\+|\\*\\*\\*([0-9]{3})/([0-9]{4})/([0-9]{5})\\*\\*\\*|([0-9]{12})\"",
+        "replace": "r\"\\+\\+\\+(\\d{3})/(\\d{4})/(\\d{5})\\+\\+\\+|\\*\\*\\*(\\d{3})/(\\d{4})/(\\d{5})\\*\\*\\*|([0-9]{12})\""
+      }
+    ],
+    "must_fail": [
+      "TestOgmValidation.test_non_ascii_digits_are_invalid"
+    ]
   }
 }
