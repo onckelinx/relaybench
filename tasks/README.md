@@ -8,6 +8,7 @@ tasks/my-task/
   starter/            files every build starts with (optional)
   hidden_tests/       acceptance tests the models never see (required)
     test_*.py
+  test_groups.json    groups test names into areas for the report (optional)
 ```
 
 | Task | Difficulty | What it asks for | Hidden tests |
@@ -20,6 +21,21 @@ Choose one with `python pipeline.py new-run --task <name>`, or set `"task"` in `
 
 Each test count is the number of tests pytest collects, after parametrisation. `tests/test_e2e.py`
 checks the counts against the reference solutions.
+
+## `test_groups.json`
+
+One mistake can fail several tests, so the report can show which areas a build's failures fall in, such as
+`non-ASCII digits (4)`. Each area lists parts of test names, and a test goes in the first area that matches it:
+
+```json
+{
+  "non-ASCII digits": ["non_ascii"],
+  "command line": ["TestCli", "test_cli"]
+}
+```
+
+Tests that match nothing show as `other`. Without this file, the report has no such column. It changes no score,
+and it's left out of the task hash, so adding it doesn't separate your results in `compare`.
 
 ## `TASK.md`
 

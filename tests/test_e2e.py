@@ -3,9 +3,10 @@
 No model and no real agent are involved: tests/scripted_agent.py plays the agent's part.
 Set RELAYBENCH_WRITE_EXAMPLE=<file> to save the toy run's report as a labelled example.
 """
+import hashlib
+import http.server
 import importlib.util
 import json
-import http.server
 import os
 import re
 import shlex
@@ -1412,7 +1413,7 @@ def test_repeat_then_compare(make_stack):
     folders = [n for n in os.listdir(stack.runs) if n.endswith("toy-bepay") or "toy-bepay-" in n]
     assert len(folders) == 2 and all(os.path.exists(os.path.join(stack.runs, n, "REPORT.md")) for n in folders)
     assert not proxy_is_up(stack) and not os.path.exists(os.path.join(stack.runs, "run.pid"))
-    assert re.search(r"\| mock-good \| 2 \| 0 \| 43\.0 \(43\.0–43\.0\) of 43 \| 2 \| \d+\.\d \(", out)
+    assert re.search(r"\| mock-good \| 2 \| 0 \| 0 \| 43\.0 \(43\.0–43\.0\) of 43 \| 2 \| \d+\.\d \(", out)
     assert "fewer than 5 runs" in out
     with open(os.path.join(stack.tmp, "results", "compare-toy-bepay.md"), encoding="utf-8") as fh:
         assert "| mock-buggy | 2 |" in fh.read()
@@ -1469,7 +1470,7 @@ def test_old_run_folder_still_reports(make_stack):
 def test_compare_counts_failed_builds_and_skips_unfinished_runs(make_stack):
     stack = unattended(make_stack, "2-build-1:nothing", reviewers=[], judges=[])
     stack.cli("run", "--allow-sleep")
-    assert "| mock-good | 1 | 1 | 0.0 of 43 | 0 | – |" in stack.cli("compare")
+    assert "| mock-good | 1 | 1 | 0 | 0.0 of 43 | 0 | – |" in stack.cli("compare")
     stack.cli("new-run")  # no report yet, so it may still be blind
     assert "# Comparing 1 finished run(s)" in stack.cli("compare")
 
@@ -2001,3 +2002,135 @@ def test_api_judge_added_during_a_run_is_called_by_that_run(make_stack):
     assert proc.wait(timeout=120) == 0, run_output(stack)
     assert "| judge-new |" in stack.text_in_run("REPORT.md")
     assert "stopped by hand" in stage_result(stack, "build-mock-good")["flags"]
+
+
+def test_stopped_builds_are_marked_in_the_report_and_compare_but_not_the_packet(make_stack):
+    stack = unattended(make_stack, "2-build-1:work-then-hang", stage_timeout_s=8, idle_timeout_s=120, reviewers=[],
+                       judges=[{"label": "gpt", "type": "paste"}])
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    stack.cli("run", "--allow-sleep")
+    report = stack.text_in_run("REPORT.md")
+    assert re.search(r"\| mock-good \| 43 of 43 \*\*\(stopped\)\*\* \|", report)
+    assert not re.search(r"\| mock-buggy \| \d+ of 43 \*\*\(stopped\)", report)
+    assert "only shows its code at that moment" in report
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert "(stopped)" not in packet, "judges score the code as it stands"
+    out = stack.cli("compare")
+    assert re.search(r"\| mock-good \| 1 \| 0 \| 1 \| 43\.0 of 43 \|", out), out
+    assert re.search(r"\| mock-buggy \| 1 \| 0 \| 0 \|", out), out
+
+
+def test_failing_areas_and_the_task_hash(make_stack, tmp_path):
+    stack = make_stack(["mock-planner", "mock-good", "mock-isdigit", "mock-reviewer"])
+    stack.write_config(builders=[{"label": "mock-good", "model": "mock-good"},
+                                 {"label": "mock-isdigit", "model": "mock-isdigit"}], reviewers=[], judges=[])
+    stack.start_proxy()
+    stack.through_tests()
+    stack.cli("blind")
+    stack.cli("packet")
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "| Failing areas |" in report
+    assert re.search(r"\| mock-isdigit \| 41 of 43 \| [^|]+ \| non-ASCII digits \(2\) \|", report), report
+    assert re.search(r"\| mock-good \| 43 of 43 \| [^|]+ \| – \|", report), report
+    assert "Failing areas" not in stack.text_in_run("4-judging", "judge-packet.md")
+
+    # Adding or changing this file explains the report, and must not split results in compare.
+    module = load_pipeline_module()
+    folder = tmp_path / "task"
+    folder.mkdir()
+    (folder / "TASK.md").write_text("task")
+    before = module.tree_hash(str(folder))
+    (folder / module.TEST_GROUPS).write_text("{}")
+    assert module.tree_hash(str(folder)) == before
+    (folder / "TASK.md").write_text("changed")
+    assert module.tree_hash(str(folder)) != before
+
+    # Without the file there's no column, and bad groups never break a report.
+    assert module._read_test_groups(str(folder)) == {}
+    assert module._failing_areas({"x": ["a"]}, ["bab", "cdc", "aaa"]) == "x (2), other (1)"
+    assert module._read_test_groups(str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("task", ["toy-bepay", "cron-next", "wal-kv"])
+def test_every_hidden_test_belongs_to_an_area(make_stack, task):
+    """A build that can't be imported fails every test, which lists them all."""
+    stack = make_stack(["mock-planner", "mock-syntax"])
+    stack.write_config(task=task, builders=[{"label": "mock-syntax", "model": "mock-syntax"}], reviewers=[], judges=[])
+    stack.start_proxy()
+    stack.plan()
+    stack.build_all()
+    stack.cli("test")
+    failing = stack.summary()["mock-syntax"]["failing"]
+    assert len(failing) == HIDDEN_COUNTS[task]
+    module = load_pipeline_module()
+    groups = module._read_test_groups(os.path.join(ROOT, "tasks", task))
+    text = module._failing_areas(groups, failing)
+    assert "other" not in text, text
+    assert sum(int(n) for n in re.findall(r"\((\d+)\)", text)) == HIDDEN_COUNTS[task]
+
+
+def test_report_totals_and_packet_hash_and_no_reviewers(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+    paste_answer(stack, "gpt", 4)
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+
+    recs = [r for r in stack.proxy_log() if r.get("run_id") == os.path.basename(stack.run_dir())]
+    assert "| **Total** | – | %d | 0 | %s |" % (len(recs), "{:,}".format(sum(r.get("input_tokens") or 0 for r in recs))) in report
+
+    with open(os.path.join(stack.run_dir(), "4-judging", "judge-packet.md"), "rb") as fh:
+        packet_bytes = fh.read()
+    assert "Packet hash: %s" % hashlib.sha256(packet_bytes).hexdigest()[:16] in report
+
+    # No empty table, and judges are told what to do.
+    assert "### Reviews" not in report and "### Verdicts" in report
+    assert "This run has no reviews" in packet_bytes.decode("utf-8")
+
+
+def test_judge_answers_are_checked_beyond_the_build_scores(make_stack):
+    stack = make_stack(["mock-planner", "mock-good", "mock-buggy", "mock-reviewer"])
+    stack.write_config(judges=[{"label": "judge-a", "type": "human"}, {"label": "judge-b", "type": "human"}])
+    stack.start_proxy()
+    stack.through_tests()
+    stack.cli("blind")
+    stack.review_all()
+    stack.cli("packet")
+    judging = os.path.join(stack.run_dir(), "4-judging")
+    fill_human_scores(os.path.join(judging, "scores-judge-a.md"))
+    fill_human_scores(os.path.join(judging, "scores-judge-b.md"))
+
+    path = os.path.join(judging, "scores-judge-a.md")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    data = json.loads(re.search(r"```json\n(.*?)\n```", text, re.DOTALL).group(1))
+    data["preferred_build"] = "Z"
+    first, second = sorted(data["reviews"])[:2]
+    data["reviews"][first]["accuracy"] = 9
+    data["reviews"][second]["false_alarms"] = -1
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text[:text.index("```json")] + "```json\n" + json.dumps(data) + "\n```\n")
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert '`judge-a`: its preferred build, "Z", isn\'t a build in this run.' in report
+    assert "`judge-a`: its scores for review %s are missing or out of range." % first in report
+    assert "`judge-a`: its scores for review %s are missing or out of range." % second in report
+    assert "`judge-b`: " not in report, "a correct answer gets no remarks"
+
+    # The build scores still count, and the judge still counts as done.
+    assert "Judge scores complete (2 of 2)" in stack.cli("status")
+    assert re.findall(r"\*\*average\*\* \| \| \| \| \| \| \*\*([\d.]+)\*\*", report) == ["20.0", "20.0"]
+
+
+def test_judge_notes_leave_out_reviews_that_were_never_written(tmp_path):
+    module = load_pipeline_module()
+    (tmp_path / "stage-results.json").write_text(json.dumps({"review-A-by-reviewer-1": {"status": "failed"}}))
+    key = {"builds": {"A": "x"}, "reviewers": {"reviewer-1": "y", "reviewer-2": "z"}}
+    notes = module._judge_notes(str(tmp_path), {"preferred_build": "A", "reviews": {}}, key)
+    assert notes == ["its scores for review A/reviewer-2 are missing or out of range"]
+
+
+def test_the_groups_file_counts_as_something_a_model_should_not_see():
+    module = load_pipeline_module()
+    assert "test_groups" in module.stage_sentinels("/x", {"builders": [{"label": "a"}]}, "build", "a")

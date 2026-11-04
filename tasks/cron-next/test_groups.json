@@ -1,0 +1,47 @@
+{
+  "package": [
+    "test_exports"
+  ],
+  "bad input": [
+    "test_invalid_expressions",
+    "test_parse_non_string",
+    "test_next_after_rejects_bad_when",
+    "test_next_after_bad_expression_raises",
+    "test_next_n_bad_count"
+  ],
+  "parsing": [
+    "test_minute_field_forms",
+    "test_step_starts_from",
+    "test_month_names",
+    "test_day_names",
+    "test_surrounding_and_repeated_whitespace",
+    "test_macros"
+  ],
+  "the next minute": [
+    "test_strictly_after",
+    "test_seconds_and_microseconds",
+    "test_accepts_parsed_schedule"
+  ],
+  "day matching": [
+    "test_dom_and_dow",
+    "test_star_step",
+    "test_only_day_of",
+    "test_or_rule"
+  ],
+  "calendar": [
+    "test_rolls_over_year_end",
+    "test_skips_short_months",
+    "test_leap_day"
+  ],
+  "schedules that end": [
+    "test_impossible_date",
+    "test_end_of_time",
+    "test_last_representable"
+  ],
+  "next_n": [
+    "test_next_n"
+  ],
+  "command line": [
+    "test_cli"
+  ]
+}

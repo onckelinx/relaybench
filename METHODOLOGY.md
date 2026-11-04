@@ -86,6 +86,10 @@ in a run, and judges get the results as strong evidence for correctness.
 - A hash of the task folder is stored when the run starts. `test` warns if the task has changed since.
 - Each included task's tests are checked against a reference solution and against deliberately wrong
   variants that must fail specific tests. Those checks are in `tests/test_e2e.py`.
+- The report groups failing tests into areas by name, because one mistake can fail several tests. In a real
+  run, non-ASCII digits were 4 of 41 tests, and the top five builds each failed for a single reason. The raw
+  count stays the main result, and the areas change no score. They are only a guide, because a shared name
+  doesn't prove a shared cause.
 - Each build's own tests also run, on their own temporary copy. They don't affect its hidden test score,
   and judges see the result as evidence for scoring those tests.
 
@@ -179,8 +183,8 @@ and keep runs with different tasks, prompts, scoring or agents apart. They don't
 
 **Stopping a model by hand is a human decision.** `skip` ends a stage early, and a person chooses which
 stage and when. A stopped build is scored on what it had at that moment, the same as a build that reached the
-stage limit, and the report says it was stopped by hand. Its score is a snapshot, not its best work. Judges
-aren't told, so they score the code as it stands.
+stage limit, and the report says it was stopped by hand. Its score is a snapshot, not its best work, so the
+report and `compare` mark every stopped build. Judges aren't told, so they score the code as it stands.
 
 **The task set is small and Python-centred.** Three tasks can't describe a model. All are small,
 self-contained Python packages with a clear spec, which favours models good at exactly that. Long

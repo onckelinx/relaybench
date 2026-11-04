@@ -68,6 +68,8 @@ UNATTENDED = False
 SELECTED_RUN = None
 RUN_OPTION_COMMANDS = ("status", "report", "judge", "packet", "add-judge")
 SKIP_REQUEST = "skip-request.json"
+# Only explains the report, and changes no test, so it stays out of the task hash.
+TEST_GROUPS = "test_groups.json"
 
 HELP = """
 Commands (run them from the repository folder):
@@ -499,6 +501,8 @@ def tree_hash(folder):
     for root, dirs, names in os.walk(folder):
         dirs[:] = sorted(d for d in dirs if d != "__pycache__")
         for name in sorted(names):
+            if name == TEST_GROUPS:
+                continue
             full = os.path.join(root, name)
             digest.update(os.path.relpath(full, folder).replace(os.sep, "/").encode())
             with open(full, "rb") as fh:
@@ -637,7 +641,7 @@ def stage_done(kind, folder):
 
 def stage_sentinels(path, run, kind, label):
     """Strings the model has no reason to see in this stage (see proxy/llm_proxy.py)."""
-    sentinels = ["hidden_tests", "blind-key"]
+    sentinels = ["hidden_tests", "blind-key", "test_groups"]
     labels = [b["label"] for b in run["builders"]]
     for other in labels:
         if kind == "build" and other == label:
@@ -1585,6 +1589,31 @@ def _own_tests_text(res):
     return "%d of %d passed%s" % (own.get("passed", 0), own["ran"], extra)
 
 
+def _read_test_groups(task_folder):
+    """A task's map of area names to the test names in them, or None if it has none."""
+    try:
+        with open(os.path.join(task_folder, TEST_GROUPS), encoding="utf-8") as fh:
+            groups = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return groups if isinstance(groups, dict) else None
+
+
+def _failing_areas(groups, failing):
+    """How many failing tests fall in each area, by name. One area may still hold several separate problems."""
+    counts = {}
+    for test in failing:
+        area = next((name for name, patterns in groups.items() if any(p in test for p in patterns)), "other")
+        counts[area] = counts.get(area, 0) + 1
+    ordered = [name for name in groups if name in counts] + (["other"] if "other" in counts else [])
+    return ", ".join("%s (%d)" % (name, counts[name]) for name in ordered) or "–"
+
+
+def _was_stopped(result):
+    """True if this stage's agent didn't get to finish: stopped by hand or at a limit."""
+    return any(flag.startswith("stopped") for flag in (result or {}).get("flags", []))
+
+
 def _passed_text(res):
     total = res.get("expected") or res.get("ran", "?")
     flags = [word for word, on in (("no build: the agent failed", res.get("no_build")),
@@ -1874,6 +1903,8 @@ def cmd_packet(cfg, _args):
     if reviews:
         # Apart from the builds, so that a review doesn't colour the first reading of the code it is about.
         parts += ["---", "", "# Reviews", "", "Score every build above before you score these.", ""] + reviews
+    else:
+        parts += ["---", "", "# Reviews", "", "This run has no reviews, so leave `reviews` empty in your JSON.", ""]
 
     judge_dir = os.path.join(path, "4-judging")
     os.makedirs(judge_dir, exist_ok=True)
@@ -2014,7 +2045,7 @@ def _valid_score(value):
 
 def _judge_scores(path, judge, key):
     """What one judge's file gives us. Null, missing or out-of-range scores don't count as scored."""
-    state = {"data": None, "complete": False, "usable": False, "problems": []}
+    state = {"data": None, "complete": False, "usable": False, "problems": [], "notes": []}
     score_file = _score_file(path, judge["label"])
     if not key or not os.path.exists(score_file):
         return state
@@ -2029,7 +2060,28 @@ def _judge_scores(path, judge, key):
         else:
             state["problems"].append("Build %s incomplete" % letter)
     state["complete"] = state["usable"] and not state["problems"]
+    state["notes"] = _judge_notes(path, data, key)
     return state
+
+
+def _judge_notes(path, data, key):
+    """Problems in the rest of a judge's answer. They don't touch its build scores, so they don't block anything."""
+    notes = []
+    if data.get("preferred_build") not in key["builds"]:
+        notes.append("its preferred build, %s, isn't a build in this run" % json.dumps(data.get("preferred_build")))
+    reviews = data.get("reviews") if isinstance(data.get("reviews"), dict) else {}
+    failed = failed_stages(path)
+    for letter in sorted_letters(key["builds"]):
+        for reviewer in sorted(key.get("reviewers", {})):
+            if "review-%s-by-%s" % (letter, reviewer) in failed:  # judges were told no review was written
+                continue
+            scores = reviews.get("%s/%s" % (letter, reviewer))
+            scores = scores if isinstance(scores, dict) else {}
+            good_counts = all(isinstance(scores.get(field), int) and not isinstance(scores.get(field), bool)
+                              and scores[field] >= 0 for field in ("real_issues", "false_alarms", "missed_important"))
+            if not (good_counts and _valid_score(scores.get("accuracy")) and _valid_score(scores.get("usefulness"))):
+                notes.append("its scores for review %s/%s are missing or out of range" % (letter, reviewer))
+    return notes
 
 
 def _parse_scores(score_file):
@@ -2102,6 +2154,15 @@ def _distinct(values):
     return ", ".join(str(v) for v in seen) or "–"
 
 
+def _packet_hash(path):
+    """So you can check that every judge's copy of the packet was the same one."""
+    try:
+        with open(os.path.join(path, "4-judging", "judge-packet.md"), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
 def cmd_report(cfg, _args):
     run_id, path, run = current_run(cfg)
     key = read_blind_key(path) or {"builds": {}, "reviewers": {}}
@@ -2162,9 +2223,9 @@ def cmd_report(cfg, _args):
              "- Backend: %s" % run.get("backend", {}).get("type", "?"),
              "- Quantisation: %s" % ("; ".join("%s: %s" % item for item in sorted(details.items())) or "not reported"),
              "- Context length: %s" % context_text,
-             "- Harness commit: %s · Task hash: %s · Prompts hash: %s · Scoring hash: %s" % (
+             "- Harness commit: %s · Task hash: %s · Prompts hash: %s · Scoring hash: %s · Packet hash: %s" % (
                  run.get("harness_commit") or "–", hashes.get("task", "–"),
-                 hashes.get("prompts", "–"), hashes.get("scoring", "–")),
+                 hashes.get("prompts", "–"), hashes.get("scoring", "–"), _packet_hash(path) or "–"),
              "- Planner: %s · Builders: %s · Reviewers: %s" % (
                  run["planner"]["label"],
                  ", ".join(b["label"] for b in run["builders"]),
@@ -2178,6 +2239,7 @@ def cmd_report(cfg, _args):
         lines += ["| Stage | Attempts | Model calls | Errors | Input tokens | Output tokens | Median time to first token | "
                   "Generation speed | Model time | Wall time |",
                   "|---|---|---|---|---|---|---|---|---|---|"]
+        total = {"calls": 0, "errors": 0, "input": 0, "output": 0, "model": 0, "wall": 0}
         for stage in order:
             recs = by_stage[stage]
             errors = sum(1 for r in recs if (r.get("status") or 0) >= 400)
@@ -2193,10 +2255,17 @@ def cmd_report(cfg, _args):
                 _f(_median([r.get("ttft_s") for r in recs])),
                 _f(_generation_speed(recs)),
                 _f(model_time / 60), _f(wall / 60)))
+            for field, value in (("calls", len(recs)), ("errors", errors), ("input", inp), ("output", out),
+                                 ("model", model_time), ("wall", wall)):
+                total[field] += value
+        lines.append("| **Total** | – | %d | %d | %s | %s%s | – | – | %s min | %s min |" % (
+            total["calls"], total["errors"], "{:,}".format(total["input"]), "~" if any_estimate else "",
+            "{:,}".format(total["output"]), _f(total["model"] / 60), _f(total["wall"] / 60)))
         included = "tool use and any gap between attempts" if results else \
             "tool use, your approvals and any gap between attempts"
         lines += ["", "*Model time* = time spent waiting for the model. "
-                      "*Wall time* = first to last model call in that stage (includes %s)." % included]
+                      "*Wall time* = first to last model call in that stage (includes %s). "
+                      "*Total* adds up the stages, so it leaves out the harness's own work between them." % included]
         if any_estimate:
             lines += ["", "`~` = the server sent no token counts for some calls, so those are counted in stream "
                           "chunks. Speeds for such stages are estimates; don't compare them across servers."]
@@ -2222,11 +2291,24 @@ def cmd_report(cfg, _args):
     if os.path.exists(tests_path):
         with open(tests_path, encoding="utf-8") as fh:
             tests = json.load(fh)
-        lines += ["| Build | Model | Passed | Own tests | Failing tests |", "|---|---|---|---|---|"]
+        groups = _read_test_groups(task_dir(cfg, run["task"]))
+        lines += ["| Build | Model | Passed | Own tests | %sFailing tests |" % ("Failing areas | " if groups else ""),
+                  "|---|---|---|---|---|%s" % ("---|" if groups else "")]
+        any_stopped = False
         for label, res in tests.items():
-            lines.append("| %s | %s | %s | %s | %s |" % (letter_of.get(label, "–" if res.get("no_build") else "?"),
-                                                         label, _passed_text(res), _own_tests_text(res),
-                                                    ", ".join(res["failing"]) or "–"))
+            # Not in _passed_text: the packet uses that too, and judges score the code as it stands.
+            stopped = _was_stopped(results.get("build-" + label))
+            any_stopped = any_stopped or stopped
+            lines.append("| %s | %s | %s%s | %s | %s%s |" % (
+                letter_of.get(label, "–" if res.get("no_build") else "?"), label, _passed_text(res),
+                " **(stopped)**" if stopped else "", _own_tests_text(res),
+                _failing_areas(groups, res["failing"]) + " | " if groups else "", ", ".join(res["failing"]) or "–"))
+        if any_stopped:
+            lines += ["", "**(stopped)** = its agent was stopped before it finished, so this only shows its code at "
+                          "that moment. See *Unattended stages*."]
+        if groups:
+            lines += ["", "*Failing areas* group the failing tests by name, to show when a few failures have one "
+                          "cause. They are a guide, and change no score."]
     else:
         lines.append("Not run yet.")
 
@@ -2238,6 +2320,8 @@ def cmd_report(cfg, _args):
             judges[judge["label"]] = state["data"]
             for problem in state["problems"]:
                 lines.append("- `%s`: %s, so it is left out of that build's average." % (judge["label"], problem))
+            for note in state["notes"]:
+                lines.append("- `%s`: %s." % (judge["label"], note))
         else:
             lines.append("- `%s`: no usable scores yet." % judge["label"])
     if not run.get("judges"):
@@ -2265,11 +2349,12 @@ def cmd_report(cfg, _args):
                                                              " | ".join(_cell(v) for v in vals), _cell(total)))
             lines.append("| %s | %s | **average** | | | | | | **%s** |" % (
                 letter, key["builds"][letter], _f(sum(totals) / len(totals)) if totals else "–"))
-        lines += ["", "### Reviews", "",
-                  "| Review | Reviewer | Judge | Real issues | False alarms | Missed important | Accuracy | Usefulness |",
-                  "|---|---|---|---|---|---|---|---|"]
+        if key.get("reviewers"):
+            lines += ["", "### Reviews", "",
+                      "| Review | Reviewer | Judge | Real issues | False alarms | Missed important | Accuracy | Usefulness |",
+                      "|---|---|---|---|---|---|---|---|"]
         for judge, data in sorted(judges.items()):
-            reviews = data.get("reviews") if isinstance(data.get("reviews"), dict) else {}
+            reviews = data.get("reviews") if isinstance(data.get("reviews"), dict) and key.get("reviewers") else {}
             for review_key, vals in sorted(reviews.items()):
                 if not isinstance(vals, dict):
                     continue
@@ -2398,8 +2483,11 @@ def cmd_compare(cfg, args):
                 tests = json.load(fh)
         except (OSError, ValueError):
             tests = {}
+        stages = _read_stage_results(path)
         for label, res in tests.items():
-            model = group["models"].setdefault(label, {"passed": [], "expected": None, "failed": 0, "judged": [], "speed": []})
+            model = group["models"].setdefault(label, {"passed": [], "expected": None, "failed": 0, "stopped": 0,
+                                                       "judged": [], "speed": []})
+            model["stopped"] += 1 if _was_stopped(stages.get("build-" + label)) else 0
             model["passed"].append(res.get("passed") or 0)
             model["expected"] = res.get("expected") or model["expected"]
             model["failed"] += 1 if res.get("no_build") else 0
@@ -2419,21 +2507,22 @@ def cmd_compare(cfg, args):
                   "Mode: `%s` · Task hash: %s · Prompts hash: %s · Scoring hash: %s · Pinned: %s" % (
                       mode, task_hash or "–", prompts or "–", scoring or "–",
                       "–" if pinned == "{}" else "`%s`" % pinned), "",
-                  "| Model | Runs | Failed builds | Hidden tests passed | Judged runs | Judge total, of 25 | Generation speed |",
-                  "|---|---|---|---|---|---|---|"]
+                  "| Model | Runs | Failed builds | Stopped | Hidden tests passed | Judged runs | Judge total, of 25 | Generation speed |",
+                  "|---|---|---|---|---|---|---|---|"]
         for label, model in sorted(group["models"].items()):
             tests_text = _spread(model["passed"])
             if model["expected"]:
                 tests_text += " of %d" % model["expected"]
-            lines.append("| %s | %d | %d | %s | %d | %s | %s tok/s |" % (
-                label, len(model["passed"]), model["failed"], tests_text, len(model["judged"]),
+            lines.append("| %s | %d | %d | %d | %s | %d | %s | %s tok/s |" % (
+                label, len(model["passed"]), model["failed"], model["stopped"], tests_text, len(model["judged"]),
                 _spread(model["judged"]), _f(_median(model["speed"]))))
         lines.append("")
         if len(group["judges"]) > 1:
             lines += ["**These runs had different judges, so their judge totals may not compare:** %s." % "; ".join(
                 sorted(", ".join(judges) or "none" for judges in group["judges"])), ""]
     lines += ["Values are the mean, with the lowest and highest in brackets. A failed build counts as 0 tests passed. "
-              "Speed is the median across runs."]
+              "*Stopped* counts builds whose agent was stopped by hand or at a limit, so their scores only show the "
+              "code at that moment. Speed is the median across runs."]
     if any(len(model["passed"]) < 5 for group in groups.values() for model in group["models"].values()):
         lines += ["", "**Some models have fewer than 5 runs here, so small differences may be chance.**"]
     text = "\n".join(lines) + "\n"

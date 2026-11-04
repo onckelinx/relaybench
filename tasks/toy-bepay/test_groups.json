@@ -1,0 +1,51 @@
+{
+  "non-ASCII digits": [
+    "non_ascii"
+  ],
+  "newlines": [
+    "newline"
+  ],
+  "OGM formats it must refuse": [
+    "test_mixed_delimiters",
+    "test_wrong_grouping",
+    "test_forbidden_formats",
+    "TestOgmValidation.test_wrong_length"
+  ],
+  "OGM formats it must accept": [
+    "test_plus_format",
+    "test_star_format",
+    "test_plain_digits",
+    "test_surrounding_whitespace"
+  ],
+  "OGM check number": [
+    "test_check_97",
+    "test_check_00",
+    "test_wrong_check_number"
+  ],
+  "making OGMs": [
+    "TestMakeOgm"
+  ],
+  "IBAN checks": [
+    "test_compact",
+    "test_spaces_and_lowercase",
+    "test_national_check_97",
+    "test_another_valid",
+    "test_wrong_iban_check_digits",
+    "test_iban_ok_but_national",
+    "test_other_country",
+    "TestIbanValidation.test_wrong_length",
+    "test_letters_in_account"
+  ],
+  "formatting IBANs": [
+    "TestFormatIban"
+  ],
+  "non-strings": [
+    "test_non_string"
+  ],
+  "command line": [
+    "TestCli"
+  ],
+  "package": [
+    "TestImport"
+  ]
+}

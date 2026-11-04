@@ -1,0 +1,51 @@
+{
+  "command line": [
+    "test_cli"
+  ],
+  "compaction": [
+    "test_compact"
+  ],
+  "crash recovery": [
+    "test_torn",
+    "test_bad_crc",
+    "test_garbage_tail",
+    "test_damage_in_the_middle"
+  ],
+  "expiry": [
+    "test_ttl",
+    "test_expiry",
+    "test_set_without_ttl",
+    "test_bad_ttl",
+    "test_set_over_expired"
+  ],
+  "transactions": [
+    "test_commit_and_rollback",
+    "test_rollback",
+    "test_nested_rollback",
+    "test_inner_commit",
+    "test_three_levels",
+    "test_transaction",
+    "test_empty_commit",
+    "test_uncommitted"
+  ],
+  "the log": [
+    "test_data_survives",
+    "test_creates_missing",
+    "test_empty_file",
+    "test_writes_are_on_disk",
+    "test_log_format",
+    "test_delete_missing",
+    "test_replays",
+    "test_closed_store"
+  ],
+  "existing API and the reported bug": [
+    "test_falsy_values",
+    "test_stored_none",
+    "test_existing_api",
+    "test_bad_keys",
+    "test_error_types",
+    "test_values_are_copied",
+    "test_values_behave",
+    "test_unserialisable"
+  ]
+}

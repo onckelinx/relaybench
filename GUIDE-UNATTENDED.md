@@ -270,7 +270,9 @@ python pipeline.py report
   shows anything that went wrong. See [When a stage goes wrong](#when-a-stage-goes-wrong).
 - **Attempts:** above 1 means a stage restarted after an interruption, so treat its numbers with care.
 - **Hidden tests:** the *Own tests* column shows what happened when the harness ran each build's own tests.
-  Judges see this too. `none found` means pytest found no tests in that build.
+  Judges see this too. `none found` means pytest found no tests in that build. **(stopped)** means the agent
+  was stopped before it finished, so the score only shows its code at that moment. *Failing areas* show when
+  several failures come from one part of the task, which may be one mistake.
 - **Integrity flags:** whether a model may have seen something it shouldn't have.
 - **The top of the report:** hardware, agent version and quantisation are filled in where the system says.
   `not reported` means it couldn't tell, so add those under *My notes*.
@@ -319,7 +321,7 @@ compare finished runs at any time:
 python pipeline.py compare --task toy-bepay
 ```
 
-For each model, this shows the runs, failed builds, hidden tests passed, judge totals and speed, and saves
+For each model, this shows the runs, failed and stopped builds, hidden tests passed, judge totals and speed, and saves
 the table in `results/`. A failed build counts as 0 tests passed. Runs with a different task version, prompts,
 scoring sheet, agent or pinned settings go in separate tables, because their results don't compare.
 
