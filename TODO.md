@@ -4,7 +4,7 @@ Ideas for later, in no particular order. What to work on first gets decided when
 
 The first five came from a nine-model unattended run, where a model got stuck in a loop on the toy task
 and used up its full hour. None of them changes the task, prompts or scoring hashes, so results from
-before and after them still compare.
+before and after them still compare. "That run" further down always means this one.
 
 ## Stop a stuck model, with a note
 
@@ -20,8 +20,7 @@ only says `agent exited with code -15`. Don't use `Ctrl+C` for this, because it 
   reviewed and judged, so a stop by hand can't favour a model.
 - The report's *Notes* column shows `stopped by hand: <note>`. The note can't reach judges, because
   `cmd_packet` doesn't read stage results.
-- `compare` counts failed builds, but a stopped build looks like a normal one. Add a *Stopped* column that
-  counts stops by hand and stops at a limit.
+- It counts as a stopped build: see [Mark stopped builds](#mark-stopped-builds).
 - `skip` warns before stopping a planner, because without a plan the run ends. It says so clearly if no
   agent is running.
 - It needs someone awake. Overnight, `stage_timeout_s` remains the only limit. Automatic loop detection is
@@ -142,6 +141,79 @@ Then run `python pipeline.py report` on the remote machine.
 Add a caveat: use the same `<run-id>` both ways, which `cat runs/CURRENT` shows on the remote machine. Build
 letters are shuffled for each run, so a score file put in the wrong run replaces that run's file and its
 scores count for the wrong models.
+
+## Add the missing OGM format tests
+
+`TASK.md` forbids these inputs, but `tasks/toy-bepay/hidden_tests/test_hidden.py` doesn't test them:
+
+- `1234 5678 9002`
+- `+123/4567/89002+`
+- `+++123456789002+++`
+- `123/4567/89002`
+- `+++123/4567/89002\n+++`
+
+The judges found builds that accept them. One build with a very permissive parser still passed 36 of 41, next
+to builds on 37, while the judges gave it 11 of 25 against their 17. The last input should also catch a build
+that passed 40 of 41.
+
+The reference solution in `tests/fixtures/toy-bepay/good` rejects all five. Superscript digits and
+`BE58 8288 3607 5983` are already tested, so they don't need adding.
+
+- Decide between adding them to an existing test, which keeps the count at 41, and a new test, which changes
+  the count in `tasks/README.md` and the check in `tests/test_e2e.py`.
+- Add failing variants to `tests/fixtures/toy-bepay/variants.json`, as for earlier tests.
+- This changes the task hash, so later runs get their own table in `compare`. Do it together with the
+  edge-case cap below.
+
+## Cap edge-case scores when a build crashes
+
+In `scoring/scoresheet.md`: a build that crashes where `TASK.md` forbids it scores at most 3 on edge cases.
+
+This was the judges' biggest disagreement in that run. Three builds got 4 from one judge and 2 from the other,
+and the stricter judge still gave a 4 to a build that crashes on a trailing newline.
+
+This changes the scoring hash, so do it together with the OGM tests above.
+
+## Tell judges how own tests are run
+
+The packet shows each build's own test results, but not that the harness runs them with pytest, which also
+collects plain `test_` functions. In that run, both judges called a plain `test_cli()` a discovery problem,
+though the harness had counted it. Say so next to the own test results, or in the scoresheet.
+
+## Keep pinned and unpinned runs apart in `compare`
+
+`cmd_compare` groups runs by task, the three hashes and the agent command. `request_overrides` isn't part of
+that, so runs with and without a `max_tokens` cap would be averaged together. Add it to the grouping, and treat
+old runs as having none.
+
+## Group failed tests by root cause
+
+Non-ASCII digits are 4 of the 41 toy tests, so one mistake can cost a build four tests. In that run, the top five
+builds each failed for a single reason, so the raw counts overstate the differences between them.
+
+- Keep the raw count as the main result, and add the failing categories next to it in the report.
+- One way is a small file in the task folder that maps tests to categories, which models never see.
+- Don't let this change any score.
+
+## Mark stopped builds
+
+The report's *Unattended stages* table shows when a build was stopped, but the *Hidden tests* table doesn't,
+and in `compare` a stopped build looks like a normal one.
+
+- Mark stopped builds in the *Hidden tests* table. Their scores only show the code at the moment they were
+  stopped. In that run, one build's score came from about 75 seconds of work, followed by one runaway answer.
+- Add a *Stopped* column to `compare`, counting stops by hand and stops at a limit.
+- Keep this out of the judge packet, so judges score the code as it stands.
+
+## Let judges cross-check each other (optional)
+
+Giving each judge the other's report found real errors in that run, including a mix-up between two builds and
+bugs that one judge had missed. It also produced false claims about missing tests, because judges can't see
+the hidden tests.
+
+- A command could build a packet with all the judges' reports and the hidden test source. Scoring is over by
+  then, so showing the tests does no harm.
+- Keep the answers as notes, not scores, because second-round scores would be anchored on the other judge.
 
 ## Smaller ideas and open offers
 
