@@ -16,8 +16,12 @@ Judge only what is in this packet. Do not guess which model wrote what.
 Use the hidden test results as strong evidence for **Correctness**, but read the
 code too: a test can pass by accident.
 
-For **Own tests**, each build shows what happened when the harness ran its tests. That is
-evidence, not proof of quality: passing tests can still be trivial, so read what they cover.
+For **Edge cases & errors**, a build that crashes where `TASK.md` forbids it scores at most 3,
+however rare the input.
+
+For **Own tests**, each build shows what happened when the harness ran its tests with pytest, which
+also collects plain `test_` functions. That is evidence, not proof of quality: passing tests can
+still be trivial, so read what they cover.
 
 Score each build on its own code and tests. Reviews are scored separately below.
 

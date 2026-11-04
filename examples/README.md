@@ -22,10 +22,10 @@ Read it as an example, not as a ranking of these models:
   harder work. See [limitations](../METHODOLOGY.md#known-limitations-and-biases).
 - **Compare it with care.** Cline's CLI sent no temperature or output limit, so each model used its defaults.
   Scores from another agent, or from a manual run, aren't directly comparable.
-- **It comes from commit `86a38bb`, and the harness has changed since.** Tests for non-ASCII digits are now
-  stricter, so `38 of 41` doesn't compare directly with newer results. Judges now get numbered code, each
-  build's own test results and tighter counting rules, reviews must give evidence, and the report's header
-  and tables have more in them.
+- **It comes from commit `86a38bb`, and the harness has changed since.** The toy task's tests are now stricter
+  and number 43, so `38 of 41` doesn't compare directly with newer results. Judges now get numbered code, each
+  build's own test results and tighter scoring rules, reviews must give evidence, and the report's header and
+  tables have more in them.
 - **Speeds depend on hardware** and quantisation, so compare them only within one machine. The
   quantisations used aren't recorded in this report.
 

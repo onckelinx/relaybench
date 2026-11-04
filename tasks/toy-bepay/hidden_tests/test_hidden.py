@@ -68,6 +68,16 @@ class TestOgmValidation(unittest.TestCase):
     def test_wrong_grouping(self):
         self.assertFalse(_fn("is_valid_ogm")("+++1234/567/89002+++"))
 
+    def test_forbidden_formats(self):
+        # Only the three listed formats are accepted. Each of these has a correct check number.
+        f = _fn("is_valid_ogm")
+        for bad in ("1234 5678 9002", "+123/4567/89002+", "+++123456789002+++", "123/4567/89002"):
+            self.assertFalse(f(bad), bad)
+
+    def test_newline_inside_delimiters(self):
+        # A regex ending in `$` also matches just before a final newline.
+        self.assertFalse(_fn("is_valid_ogm")("+++123/4567/89002\n+++"))
+
     def test_wrong_length(self):
         f = _fn("is_valid_ogm")
         self.assertFalse(f("12345678900"))

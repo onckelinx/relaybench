@@ -88,7 +88,7 @@ def build_files(task, variant):
 
 
 def variant_of(model):
-    for name in ("buggy", "isdigit", "udigits", "syntax", "importhang", "loop"):
+    for name in ("buggy", "isdigit", "udigits", "lenient", "newline", "syntax", "importhang", "loop"):
         if name in model:
             return name
     return "good"

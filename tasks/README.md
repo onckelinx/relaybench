@@ -12,7 +12,7 @@ tasks/my-task/
 
 | Task | Difficulty | What it asks for | Hidden tests |
 |---|---|---|---|
-| [`toy-bepay`](toy-bepay/TASK.md) | Toy | Validators for Belgian payment references, and a small CLI. Pure functions, country-specific rules. | 41 |
+| [`toy-bepay`](toy-bepay/TASK.md) | Toy | Validators for Belgian payment references, and a small CLI. Pure functions, country-specific rules. | 43 |
 | [`cron-next`](cron-next/TASK.md) | Medium | A cron parser and next-run calculator. Easy to start, with famous traps: the day-of-month/day-of-week OR rule, leap years, schedules that never fire. | 100 |
 | [`wal-kv`](wal-kv/TASK.md) | Hard | Extending an existing in-memory store with a write-ahead log, nested transactions, expiry, crash recovery and compaction, and fixing a reported bug. | 57 |
 

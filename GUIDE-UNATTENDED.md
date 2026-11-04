@@ -43,7 +43,11 @@ tmux new -s relay        # macOS: brew install tmux, if it isn't found
 | Open a new window | `Ctrl+B`, then `C` |
 | Switch to the next window | `Ctrl+B`, then `N` |
 | Leave everything running | `Ctrl+B`, then `D` |
+| See your sessions | `tmux ls` |
 | Come back later | `tmux attach -t relay` |
+| Change session when you're already inside tmux | `tmux switch-client -t relay`, or `Ctrl+B`, then `S` to pick from a list |
+
+If `tmux attach` says `sessions should be nested with care`, you're already inside tmux, so use `switch-client`.
 
 ## Set up
 
@@ -208,7 +212,14 @@ A line is printed as each stage ends, with its outcome, time and number of model
 ```
 
 Hidden test scores stay hidden until the report, so you stay blind to which model did what. To see where a
-run has got to, type `python pipeline.py status` in another window, with the environment activated.
+run has got to, and what its agent is doing, type this in another window, with the environment activated:
+
+```bash
+python pipeline.py status
+tail -n 30 "$(ls -t runs/$(cat runs/CURRENT)/agent-logs/*.log | head -1)"
+```
+
+Agent logs show which model wrote what, so if you're a `human` judge, don't read them before you've scored.
 
 ### 10. Judges and the report
 
@@ -222,6 +233,9 @@ already included. If you have `paste` or `human` judges, it lists them as still 
 3. Copy the **complete** answer with the chat's copy button, and paste it into
    `4-judging/scores-<label>.md`, below the first line. Copying only the JSON leaves out the reasoning.
 
+`run` creates that score file when it makes the packet, after all the reviews, so `4-judging` doesn't exist
+before then.
+
 If the answer's format is off, ask: `Rewrite your answer in exactly the format under "Required output" in the scoring sheet.`
 
 **On SSH?** The packet is on the remote machine and your browser isn't. Copy it across, from the computer
@@ -230,6 +244,17 @@ with the browser:
 ```bash
 scp <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/judge-packet.md .
 ```
+
+You can edit score files on that computer too. Fetch one, and put it back when it's done:
+
+```bash
+scp <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/scores-<label>.md .
+scp scores-<label>.md <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/
+```
+
+Use the same `<run-id>` both ways, which `cat runs/CURRENT` shows on the remote machine. Build letters are
+shuffled for each run, so a score file put in the wrong run replaces that run's file, and its scores count for
+the wrong models.
 
 **For each `human` judge:** fill in `4-judging/scores-<label>.md`, replacing every `null`.
 
@@ -295,7 +320,7 @@ python pipeline.py compare --task toy-bepay
 
 For each model, this shows the runs, failed builds, hidden tests passed, judge totals and speed, and saves
 the table in `results/`. A failed build counts as 0 tests passed. Runs with a different task version, prompts,
-scoring sheet or agent go in separate tables, because their results don't compare.
+scoring sheet, agent or pinned settings go in separate tables, because their results don't compare.
 
 - **Judges:** with `paste` judges, each run waits for two more chats from you, so judging many runs by hand
   is a lot of copying. `api` judges suit this better. Without judges, you still get tests and speed for every
@@ -374,7 +399,8 @@ every model, add this to the top level of `pipeline.json`:
 
 The proxy then replaces whatever the agent sends, on every model call, and the report marks those values as
 *pinned*. It only takes `temperature` and `max_tokens`. A new run picks up a change; a run in progress keeps
-what it started with.
+what it started with. Running `init` again keeps these settings. A proxy started before the code last changed
+may ignore them, so `run` won't start until you've stopped that proxy.
 
 - **`max_tokens`** is the useful one: too low cuts answers off, so choose a generous value.
 - **`temperature`** is usually better left out, so that each model uses its own default. Some models loop at
@@ -479,8 +505,10 @@ powercfg /change hibernate-timeout-ac 0
 | `Not offered by the server` | A model id in `pipeline.json` has a typo. Compare with `python pipeline.py models`. |
 | `check` says the proxy isn't running | See step 6, or skip it: `run` starts the proxy itself. |
 | `check` says the proxy forwards elsewhere | You changed the backend. Restart the proxy. |
+| `The running proxy ... was started before the code last changed` | You updated relaybench while a proxy was running. Stop it with `Ctrl+C` in its window. `run` starts a fresh one. |
+| `Address already in use` starting the proxy | A proxy is already running, perhaps in another tmux session, so look with `tmux ls`. Use that one, or choose another port in both `pipeline.json` and your agent. |
 | A stage fails with "no model calls reached the proxy" | The agent isn't using the proxy. See step 5, and read its log in `agent-logs/` in the run's folder. |
-| `... is already working here` | A `run` is still going, probably in another window. Look with `tmux attach -t relay`. |
+| `... is already working here` | A `run` is still going, probably in another window. Look with `tmux ls` and `tmux attach -t relay`. |
 | `run` says an agent may still be working | A killed `run` left it behind. Stop that process. If the pid belongs to something else, delete `agent.pid` in the runs folder. |
 | `set the environment variable ... first` | An `api` judge needs its key. Use `export` in this window, then start again. |
 | `Run ... isn't finished` | You gave `--task` while another run is unfinished. Finish it with `python pipeline.py run`, or use `new-run --task <name>` and then `run`. |

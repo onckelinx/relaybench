@@ -465,6 +465,7 @@ and watch for `blind` warnings.
 | The proxy logs calls under the wrong stage | You skipped `next`. Run `start <stage>` for the stage you're in. |
 | The first reply takes very long | Normal: the model first reads the agent's instructions, and may first have to load. It shows as a high `ttft`. |
 | A model loops or ignores its tools | Cancel, nudge it once, and note it in the report. |
+| `The running proxy ... was started before the code last changed` | You updated relaybench while a proxy was running. Stop it with `Ctrl+C` and start it again. |
 | `Address already in use` starting the proxy | A proxy is already running, or `proxy_port` is taken. Use that one, or choose another port in both the config and the agent. |
 | A score file isn't counted | Every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. |
 | `judge` fails with a 400 about tokens or length | The packet may be too large for that model. Try a model with more context, or add `"max_tokens"` to the judge if its API requires it. |

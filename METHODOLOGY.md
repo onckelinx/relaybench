@@ -103,9 +103,13 @@ Vague reviews and loose scoring were the weakest part of the first real run, so 
   after all the builds, and judges score the builds first.
 - **Counting** follows fixed rules in the scoring sheet: one root cause counts as one issue, each reported
   issue is either real or a false alarm, and a missed issue must break a requirement or a hidden test.
+- **Edge cases** are capped: a build that crashes where the task forbids it scores at most 3. This was the
+  judges' biggest disagreement in a real run, when one gave 4 and the other 2 for the same builds.
+- **Own tests** are run with pytest, and judges are told so, because pytest also collects plain `test_`
+  functions that `unittest` would miss.
 
 Changing the prompts or the scoring sheet changes their hashes in the report, and `compare` keeps runs with
-different hashes apart.
+different hashes or different pinned settings apart.
 
 ## Metrics via proxy
 

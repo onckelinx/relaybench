@@ -37,5 +37,29 @@
     "must_fail": [
       "TestOgmValidation.test_non_ascii_digits_are_invalid"
     ]
+  },
+  "lenient": {
+    "edits": [
+      {
+        "file": "bepay/validators.py",
+        "find": "|([0-9]{12})\"",
+        "replace": "|([0-9]{12})|([0-9]{4}) ([0-9]{4}) ([0-9]{4})|\\+([0-9]{3})/([0-9]{4})/([0-9]{5})\\+|\\+\\+\\+([0-9]{12})\\+\\+\\+|([0-9]{3})/([0-9]{4})/([0-9]{5})\""
+      }
+    ],
+    "must_fail": [
+      "TestOgmValidation.test_forbidden_formats"
+    ]
+  },
+  "newline": {
+    "edits": [
+      {
+        "file": "bepay/validators.py",
+        "find": "([0-9]{5})\\+\\+\\+|",
+        "replace": "([0-9]{5})\\n?\\+\\+\\+|"
+      }
+    ],
+    "must_fail": [
+      "TestOgmValidation.test_newline_inside_delimiters"
+    ]
   }
 }

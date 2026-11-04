@@ -137,6 +137,20 @@ def next_step(lines):
     print()
 
 
+def overrides_problem(overrides):
+    """What's wrong with a request_overrides value, or None."""
+    if overrides is None:
+        return None
+    if not isinstance(overrides, dict) or set(overrides) - {"temperature", "max_tokens"}:
+        return "request_overrides can only hold temperature and max_tokens."
+    temperature, limit = overrides.get("temperature", 0), overrides.get("max_tokens", 1)
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or temperature < 0:
+        return "request_overrides.temperature must be a number of 0 or more."
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return "request_overrides.max_tokens must be a whole number above 0."
+    return None
+
+
 def validate_config(cfg):
     """Stop early with a clear message: labels end up in stage names and file names."""
     if not isinstance(cfg.get("planner"), dict):
@@ -170,15 +184,9 @@ def validate_config(cfg):
     backend = cfg.get("backend", {})
     if backend.get("type", "lmstudio") not in ("lmstudio", "openai-compatible"):
         die("backend.type must be \"lmstudio\" or \"openai-compatible\".")
-    overrides = cfg.get("request_overrides")
-    if overrides is not None:
-        if not isinstance(overrides, dict) or set(overrides) - {"temperature", "max_tokens"}:
-            die("request_overrides can only hold temperature and max_tokens.")
-        temperature, limit = overrides.get("temperature", 0), overrides.get("max_tokens", 1)
-        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or temperature < 0:
-            die("request_overrides.temperature must be a number of 0 or more.")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            die("request_overrides.max_tokens must be a whole number above 0.")
+    problem = overrides_problem(cfg.get("request_overrides"))
+    if problem:
+        die(problem)
     agent = cfg.get("agent")
     if agent is not None:
         command = agent.get("command") if isinstance(agent, dict) else None
@@ -391,6 +399,17 @@ def set_stage(cfg, run_id, stage, label, model_id=None, sentinels=None, override
     os.replace(tmp, stage_file(cfg))  # the proxy reads this file at any moment
 
 
+def stale_proxy_problem(health):
+    """A running proxy keeps the code it started with, which may ignore newer settings such as request_overrides."""
+    with open(os.path.join(HERE, "proxy", "llm_proxy.py"), "rb") as fh:
+        current = hashlib.sha256(fh.read()).hexdigest()[:16]
+    if health.get("code") == current:
+        return None
+    return ("The running proxy (pid %s) was started before the code last changed, so it may ignore newer settings "
+            "such as request_overrides. Stop it with Ctrl+C in its window. 'run' starts a fresh one by itself."
+            % health.get("pid", "unknown"))
+
+
 def current_run(cfg):
     root = runs_root(cfg)
     pointer = os.path.join(root, "CURRENT")
@@ -475,9 +494,11 @@ def harness_commit():
     if not os.path.isdir(os.path.join(HERE, ".git")):
         return None
     try:
-        return git(HERE, "rev-parse", "--short", "HEAD").stdout.strip()
+        commit = git(HERE, "rev-parse", "--short", "HEAD").stdout.strip()
+        changed = git(HERE, "status", "--porcelain", "--untracked-files=no").stdout.strip()
     except (subprocess.CalledProcessError, OSError):
         return None
+    return commit + " (with uncommitted changes)" if changed else commit
 
 
 def machine_info():
@@ -866,6 +887,16 @@ def current_agent():
     return None
 
 
+def current_overrides():
+    """Pinned settings in an existing config, so that running init again doesn't silently drop them."""
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            overrides = json.load(fh).get("request_overrides")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return overrides if overrides and not overrides_problem(overrides) else None
+
+
 def ask_agent(current):
     """Which command-line agent `run` uses. Returns its settings, or None for manual runs only."""
     say("\nA command-line agent lets '%s run' do a whole run unattended:" % CMD)
@@ -972,6 +1003,10 @@ def cmd_init(_cfg, args):
     }
     if agent:
         cfg["agent"] = agent
+    overrides = current_overrides()
+    if overrides:
+        cfg["request_overrides"] = overrides
+        say("\nKeeping your pinned settings: %s" % json.dumps(overrides))
     validate_config(cfg)
     os.makedirs(os.path.dirname(os.path.abspath(CONFIG_PATH)), exist_ok=True)
     tmp = CONFIG_PATH + ".tmp"
@@ -1063,6 +1098,9 @@ def cmd_check(cfg, _args):
             fail("The proxy forwards to %s, but the config says %s. Restart the proxy."
                  % (health["upstream"], backend_root(cfg)))
             problems += 1
+        stale = stale_proxy_problem(health)
+        if stale:
+            warn(stale)
     except (urllib.error.URLError, OSError, ValueError):
         fail("Logging proxy is not running. Start it in another window:  %s proxy/llm_proxy.py" % PY)
         problems += 1
@@ -2249,14 +2287,15 @@ def cmd_compare(cfg, args):
     for rec in _read_log(cfg):
         log.setdefault((rec.get("run_id"), rec.get("stage")), []).append(rec)
 
-    # Different tests, prompts, scoring or agent mean different results, so these never share a table.
+    # Different tests, prompts, scoring, agent or pinned settings mean different results, so these never share a table.
     groups = {}
     for name, path, run in runs:
         hashes = run.get("hashes") or {}
         agent = (run.get("agent") or {}).get("command")
         mode = shlex.join(agent) if agent and _read_stage_results(path) else "manual"
+        pinned = json.dumps(run.get("request_overrides") or {}, sort_keys=True)
         group = groups.setdefault((run.get("task"), hashes.get("task"), hashes.get("prompts"),
-                                   hashes.get("scoring"), mode), {"runs": 0, "models": {}})
+                                   hashes.get("scoring"), mode, pinned), {"runs": 0, "models": {}})
         group["runs"] += 1
         key = read_blind_key(path) or {"builds": {}}
         letter_of = {label: letter for letter, label in key["builds"].items()}
@@ -2279,11 +2318,13 @@ def cmd_compare(cfg, args):
 
     lines = ["# Comparing %d finished run(s)" % len(runs), ""]
     if len(groups) > 1:
-        lines += ["These runs differ in their task, prompts, scoring or agent, so they are not averaged together.", ""]
-    for (task, task_hash, prompts, scoring, mode), group in groups.items():
+        lines += ["These runs differ in their task, prompts, scoring, agent or pinned settings, "
+                  "so they are not averaged together.", ""]
+    for (task, task_hash, prompts, scoring, mode, pinned), group in groups.items():
         lines += ["## `%s`: %d run(s)" % (task, group["runs"]), "",
-                  "Mode: `%s` · Task hash: %s · Prompts hash: %s · Scoring hash: %s" % (
-                      mode, task_hash or "–", prompts or "–", scoring or "–"), "",
+                  "Mode: `%s` · Task hash: %s · Prompts hash: %s · Scoring hash: %s · Pinned: %s" % (
+                      mode, task_hash or "–", prompts or "–", scoring or "–",
+                      "–" if pinned == "{}" else "`%s`" % pinned), "",
                   "| Model | Runs | Failed builds | Hidden tests passed | Judged runs | Judge total, of 25 | Generation speed |",
                   "|---|---|---|---|---|---|---|"]
         for label, model in sorted(group["models"].items()):
@@ -2614,6 +2655,14 @@ def _run_preflight(cfg, agent, source):
     for model in all_models(source):
         if offered and not model_listed(model["model"], offered):
             die("Not offered by the server: %s (%s). Compare with:  %s models" % (model["label"], model["model"], CMD))
+    try:
+        health = http_json(proxy_url(cfg) + "/__health", timeout=5)
+    except (urllib.error.URLError, OSError, ValueError):
+        health = None  # nothing answering is fine: run starts its own
+    # Only here, at the start: a run that is under way must not stop over this during the night.
+    stale = stale_proxy_problem(health) if isinstance(health, dict) else None
+    if stale:
+        die(stale)
     for judge in source.get("judges", []):
         if judge["type"] != "api":
             continue

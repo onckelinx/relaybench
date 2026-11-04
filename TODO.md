@@ -2,9 +2,8 @@
 
 Ideas for later, in no particular order. What to work on first gets decided when we get to it.
 
-The first five came from a nine-model unattended run, where a model got stuck in a loop on the toy task
-and used up its full hour. None of them changes the task, prompts or scoring hashes, so results from
-before and after them still compare. "That run" further down always means this one.
+Most of these came from a nine-model unattended run, where a model got stuck in a loop on the toy task and
+used up its full hour. "That run" further down always means this one.
 
 ## Stop a stuck model, with a note
 
@@ -62,32 +61,6 @@ Related changes:
 
 **Tests:** cover before and after the packet, after `REPORT.md` exists, duplicate labels, and `--run`.
 
-## Show how to watch a run
-
-In step 9 of `GUIDE-UNATTENDED.md`, add:
-
-```bash
-python pipeline.py status
-tail -n 30 "$(ls -t runs/$(cat runs/CURRENT)/agent-logs/*.log | head -1)"
-```
-
-Add a caveat: agent logs show which model wrote what, so a `human` judge shouldn't read them before scoring.
-
-## More tmux help
-
-Extend the table under "Connected over SSH?" in `GUIDE-UNATTENDED.md`:
-
-- `tmux ls` lists sessions.
-- `tmux switch-client -t <name>`, or `Ctrl+B` then `S`, changes session from inside tmux.
-- Explain that the "sessions should be nested with care" warning means you're already inside tmux.
-- Add the `Address already in use` row to the troubleshooting table. Today only the manual guide has it.
-
-## Say when judge files appear
-
-`cmd_packet` already creates `scores-<label>.md` for `paste` and `human` judges, and `judge` writes the `api`
-ones. They only appear at the packet step, after all reviews, so `4-judging/` doesn't exist during a long
-run. Say so in step 10 of `GUIDE-UNATTENDED.md`. `add-judge` above covers judges added later.
-
 ## Explain how to add a forgotten judge
 
 Add a row to the troubleshooting tables in `GUIDE-UNATTENDED.md` and `GUIDE-MANUAL.md`, for when a judge was
@@ -122,69 +95,6 @@ The section should also say:
 These steps were rehearsed on a mock run, for a `paste` judge only. Check `api` and `human` judges before
 documenting them, and add the rehearsal to `tests/test_e2e.py` so the guides stay true. Replace the section
 with `add-judge` once that exists.
-
-## Copy score files to and from the remote machine
-
-Step 10 of `GUIDE-UNATTENDED.md` shows how to fetch the packet over SSH, but not the score files. You may
-want to edit those on the computer with the browser, so add both directions, run from that computer:
-
-```bash
-# Fetch a score file to edit here
-scp <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/scores-<label>.md .
-
-# Put it back when it's done
-scp scores-<label>.md <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/
-```
-
-Then run `python pipeline.py report` on the remote machine.
-
-Add a caveat: use the same `<run-id>` both ways, which `cat runs/CURRENT` shows on the remote machine. Build
-letters are shuffled for each run, so a score file put in the wrong run replaces that run's file and its
-scores count for the wrong models.
-
-## Add the missing OGM format tests
-
-`TASK.md` forbids these inputs, but `tasks/toy-bepay/hidden_tests/test_hidden.py` doesn't test them:
-
-- `1234 5678 9002`
-- `+123/4567/89002+`
-- `+++123456789002+++`
-- `123/4567/89002`
-- `+++123/4567/89002\n+++`
-
-The judges found builds that accept them. One build with a very permissive parser still passed 36 of 41, next
-to builds on 37, while the judges gave it 11 of 25 against their 17. The last input should also catch a build
-that passed 40 of 41.
-
-The reference solution in `tests/fixtures/toy-bepay/good` rejects all five. Superscript digits and
-`BE58 8288 3607 5983` are already tested, so they don't need adding.
-
-- Decide between adding them to an existing test, which keeps the count at 41, and a new test, which changes
-  the count in `tasks/README.md` and the check in `tests/test_e2e.py`.
-- Add failing variants to `tests/fixtures/toy-bepay/variants.json`, as for earlier tests.
-- This changes the task hash, so later runs get their own table in `compare`. Do it together with the
-  edge-case cap below.
-
-## Cap edge-case scores when a build crashes
-
-In `scoring/scoresheet.md`: a build that crashes where `TASK.md` forbids it scores at most 3 on edge cases.
-
-This was the judges' biggest disagreement in that run. Three builds got 4 from one judge and 2 from the other,
-and the stricter judge still gave a 4 to a build that crashes on a trailing newline.
-
-This changes the scoring hash, so do it together with the OGM tests above.
-
-## Tell judges how own tests are run
-
-The packet shows each build's own test results, but not that the harness runs them with pytest, which also
-collects plain `test_` functions. In that run, both judges called a plain `test_cli()` a discovery problem,
-though the harness had counted it. Say so next to the own test results, or in the scoresheet.
-
-## Keep pinned and unpinned runs apart in `compare`
-
-`cmd_compare` groups runs by task, the three hashes and the agent command. `request_overrides` isn't part of
-that, so runs with and without a `max_tokens` cap would be averaged together. Add it to the grouping, and treat
-old runs as having none.
 
 ## Group failed tests by root cause
 
@@ -224,6 +134,4 @@ the hidden tests.
 - Tidy the packet and report for runs with no reviewers.
 - Add a total-time row and cached tokens to the report.
 - Add a packet hash.
-- Flag uncommitted harness changes.
-- Have `check` and `run` warn about a proxy started before the latest pull.
 - Tag a new version after a real run has exercised the latest changes.

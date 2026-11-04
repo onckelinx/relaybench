@@ -5,6 +5,7 @@ Set RELAYBENCH_WRITE_EXAMPLE=<file> to save the toy run's report as a labelled e
 """
 import importlib.util
 import json
+import http.server
 import os
 import re
 import shlex
@@ -15,6 +16,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -30,7 +32,7 @@ MOCK = os.path.join(ROOT, "tests", "mock_server.py")
 FAKE_LMS = os.path.join(ROOT, "tests", "fake_lms.py")
 AGENT = os.path.join(ROOT, "tests", "scripted_agent.py")
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
-HIDDEN_COUNTS = {"toy-bepay": 41, "cron-next": 100, "wal-kv": 57}
+HIDDEN_COUNTS = {"toy-bepay": 43, "cron-next": 100, "wal-kv": 57}
 
 EXAMPLE_BANNER = """<!--
   SYNTHETIC EXAMPLE. Every model here is a mock, and every number is meaningless.
@@ -404,8 +406,10 @@ def test_full_run(make_stack, task):
     if example and task == "toy-bepay":
         with open(os.path.join(ROOT, example), "w", encoding="utf-8") as fh:
             # Whichever machine regenerates this, its hardware has no place in a public example.
-            fh.write(EXAMPLE_BANNER + re.sub(r"(?m)^- Hardware: .*$", "- Hardware: (left out of this example)",
-                                             stack.text_in_run("REPORT.md")))
+            report = re.sub(r"(?m)^- Hardware: .*$", "- Hardware: (left out of this example)",
+                            stack.text_in_run("REPORT.md"))
+            # It's regenerated before the commit that includes it, and that says nothing about the example.
+            fh.write(EXAMPLE_BANNER + report.replace(" (with uncommitted changes)", ""))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the fake lms is a shell script")
@@ -456,7 +460,7 @@ def test_lmstudio_mode_loads_under_alias(make_stack, tmp_path):
     assert {r["model"] for r in stack.requests() if "smoke" not in r["path"]} == {"local-model"}
     report = stack.text_in_run("REPORT.md")
     assert "Context length: 65536 tokens" in report
-    assert "4 |" in report and "41 of 41" in report
+    assert "4 |" in report and "43 of 43" in report
 
     # A second stage with the same model doesn't reload it.
     reviewer_loads = [c for c in loads if c[1] == "pub/mock-reviewer"]
@@ -727,7 +731,7 @@ def test_own_tests_are_run_and_shown(make_stack):
     fill_human_scores(os.path.join(stack.run_dir(), "4-judging", "scores-judge-human.md"))
     stack.cli("report")
     report = stack.text_in_run("REPORT.md")
-    assert "| Own tests |" in report and re.search(r"\| mock-good-mixed \| 41 of 41 \| 2 of 3 passed \|", report)
+    assert "| Own tests |" in report and re.search(r"\| mock-good-mixed \| 43 of 43 \| 2 of 3 passed \|", report)
 
 
 def test_request_overrides_pin_settings_for_every_model_call(make_stack):
@@ -776,12 +780,12 @@ def test_build_hanging_on_import_times_out_without_stalling(make_stack):
     assert time.time() - started < 40
     assert "timed out or lost tests" in out
     res = stack.summary()["mock-importhang"]
-    assert res["timeout"] and res["passed"] == 0 and res["expected"] == 41
-    assert stack.summary()["mock-good"]["passed"] == 41
+    assert res["timeout"] and res["passed"] == 0 and res["expected"] == 43
+    assert stack.summary()["mock-good"]["passed"] == 43
     stack.cli("blind")
     stack.review_all()
     stack.cli("packet")
-    assert "0 of 41 (timeout" in stack.text_in_run("4-judging", "judge-packet.md")
+    assert "0 of 43 (timeout" in stack.text_in_run("4-judging", "judge-packet.md")
 
 
 def test_collection_error_is_reported_not_counted(make_stack, tmp_path):
@@ -1408,7 +1412,7 @@ def test_repeat_then_compare(make_stack):
     folders = [n for n in os.listdir(stack.runs) if n.endswith("toy-bepay") or "toy-bepay-" in n]
     assert len(folders) == 2 and all(os.path.exists(os.path.join(stack.runs, n, "REPORT.md")) for n in folders)
     assert not proxy_is_up(stack) and not os.path.exists(os.path.join(stack.runs, "run.pid"))
-    assert re.search(r"\| mock-good \| 2 \| 0 \| 41\.0 \(41\.0–41\.0\) of 41 \| 2 \| \d+\.\d \(", out)
+    assert re.search(r"\| mock-good \| 2 \| 0 \| 43\.0 \(43\.0–43\.0\) of 43 \| 2 \| \d+\.\d \(", out)
     assert "fewer than 5 runs" in out
     with open(os.path.join(stack.tmp, "results", "compare-toy-bepay.md"), encoding="utf-8") as fh:
         assert "| mock-buggy | 2 |" in fh.read()
@@ -1465,7 +1469,7 @@ def test_old_run_folder_still_reports(make_stack):
 def test_compare_counts_failed_builds_and_skips_unfinished_runs(make_stack):
     stack = unattended(make_stack, "2-build-1:nothing", reviewers=[], judges=[])
     stack.cli("run", "--allow-sleep")
-    assert "| mock-good | 1 | 1 | 0.0 of 41 | 0 | – |" in stack.cli("compare")
+    assert "| mock-good | 1 | 1 | 0.0 of 43 | 0 | – |" in stack.cli("compare")
     stack.cli("new-run")  # no report yet, so it may still be blind
     assert "# Comparing 1 finished run(s)" in stack.cli("compare")
 
@@ -1695,3 +1699,102 @@ def test_unit_helpers():
     assert module.make_label("Org/Model:Tag v2", taken) == "model-tag-v2"
     assert module.backend_root({"backend": {"url": "http://x:1/v1/"}}) == "http://x:1"
     assert module.backend_root({"backend": {"url": "https://x/api/v1"}}) == "https://x/api"
+
+
+@pytest.mark.parametrize("variant", ["lenient", "newline"])
+def test_forbidden_ogm_formats_are_caught(make_stack, variant):
+    """A build with a very permissive parser once passed all but one of the format tests."""
+    model = "mock-" + variant
+    stack = make_stack(["mock-planner", "mock-good", model, "mock-reviewer"])
+    stack.write_config(builders=[{"label": "mock-good", "model": "mock-good"}, {"label": model, "model": model}])
+    stack.start_proxy()
+    stack.through_tests()
+    summary = stack.summary()
+    assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"]
+    with open(os.path.join(FIXTURES, "toy-bepay", "variants.json"), encoding="utf-8") as fh:
+        must_fail = json.load(fh)[variant]["must_fail"]
+    assert sorted(summary[model]["failing"]) == sorted(must_fail)
+
+
+def test_run_refuses_a_proxy_from_before_an_update(make_stack):
+    """A proxy started before a pull keeps its old code, and could silently ignore request_overrides."""
+    stack = unattended(make_stack)
+
+    class OldProxy(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"ok": True, "pid": 4242}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", stack.proxy_port), OldProxy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        out = stack.cli("run", "--allow-sleep", expect=1)
+        assert "started before the code last changed" in out and "4242" in out
+        assert not os.path.exists(os.path.join(stack.runs, "CURRENT")), "nothing may have started"
+        assert "started before the code last changed" in stack.cli("check", expect=None)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # A proxy running the current code is fine, and stays running afterwards.
+    stack.start_proxy()
+    assert "started before the code last changed" not in stack.cli("check", expect=None)
+    assert "started before the code last changed" not in stack.cli("run", "--allow-sleep")
+    assert proxy_is_up(stack)
+    assert os.path.exists(os.path.join(stack.run_dir(), "REPORT.md"))
+
+
+def test_init_keeps_pinned_settings(make_stack):
+    stack = make_stack(["org/model-a", "org/model-b"])
+    wait_for_http(stack.mock_url + "/v1/models")
+    answers = "\n".join(["2", stack.mock_url + "/v1", "", str(stack.proxy_port), "1", "2", "", "", "y", "1",
+                         stack.runs, "toy-bepay", ""])
+    stack.write_config(request_overrides={"max_tokens": 16384})
+    out = stack.cli("init", "--force", stdin=answers)
+    assert "Keeping your pinned settings" in out
+    assert stack.load_config()["request_overrides"] == {"max_tokens": 16384}
+
+    # A value that was already invalid must not make init impossible to run.
+    stack.write_config(request_overrides={"seed": 1})
+    assert "Keeping your pinned settings" not in stack.cli("init", "--force", stdin=answers)
+    assert "request_overrides" not in stack.load_config()
+
+
+def test_compare_keeps_pinned_and_unpinned_runs_apart(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    cfg = stack.load_config()
+    cfg["request_overrides"] = {"max_tokens": 16384}
+    stack.save_config(cfg)
+    stack.cli("run", "--allow-sleep")
+    out = stack.cli("compare")
+    assert out.count("## `toy-bepay`: 1 run(s)") == 2, out
+    assert "`{\"max_tokens\": 16384}`" in out and "pinned settings" in out
+
+
+def test_harness_commit_says_when_files_have_changed(tmp_path):
+    repo = tmp_path / "harness"
+    repo.mkdir()
+    shutil.copy(PIPELINE, str(repo / "pipeline.py"))
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+    for command in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+        subprocess.run(["git"] + command, cwd=str(repo), env=env, check=True, capture_output=True)
+
+    def commit():
+        return subprocess.run([sys.executable, "-c", "import pipeline; print(pipeline.harness_commit())"], cwd=str(repo),
+                              env=env, check=True, capture_output=True, encoding="utf-8").stdout.strip()
+
+    assert re.fullmatch(r"[0-9a-f]+", commit())
+    (repo / "not-tracked.txt").write_text("doesn't count")
+    assert re.fullmatch(r"[0-9a-f]+", commit())
+    with open(str(repo / "pipeline.py"), "a", encoding="utf-8") as fh:
+        fh.write("# changed\n")
+    assert commit().endswith(" (with uncommitted changes)")

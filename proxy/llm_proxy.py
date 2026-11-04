@@ -34,6 +34,7 @@ Stop it with:    Ctrl+C
 
 Standard library only. Works with Python 3.9+.
 """
+import hashlib
 import http.client
 import http.server
 import json
@@ -46,6 +47,9 @@ from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.dirname(HERE)
+# Which code this process is running, so `check` and `run` can spot a proxy from before an update.
+with open(os.path.abspath(__file__), "rb") as _source:
+    CODE_HASH = hashlib.sha256(_source.read()).hexdigest()[:16]
 DEFAULT_UPSTREAM = "http://127.0.0.1:1234"
 DEFAULT_PORT = 1235
 
@@ -258,7 +262,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _forward(self):
         started = time.time()
         if self.path == "/__health":
-            self._send_simple(200, {"ok": True, "upstream": UPSTREAM, "pid": os.getpid()})
+            self._send_simple(200, {"ok": True, "upstream": UPSTREAM, "pid": os.getpid(), "code": CODE_HASH})
             return
 
         stage_info = current_stage()
