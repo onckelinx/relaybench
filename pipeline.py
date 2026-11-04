@@ -64,6 +64,10 @@ STAGE_MESSAGE = "Follow the instructions in PROMPT.md"
 AGENT_EXAMPLE = """  "agent": { "command": ["my-agent", "--some-auto-approve-flag", "%s"] }""" % STAGE_MESSAGE
 # Printed instructions are for a person, so `run` turns them off.
 UNATTENDED = False
+# From --run: work on this run instead of the current one.
+SELECTED_RUN = None
+RUN_OPTION_COMMANDS = ("status", "report", "judge", "packet", "add-judge")
+SKIP_REQUEST = "skip-request.json"
 
 HELP = """
 Commands (run them from the repository folder):
@@ -82,6 +86,8 @@ Commands (run them from the repository folder):
   {cmd} report           Collect speed, tests and scores into REPORT.md
   {cmd} run              Do all of the above unattended, with a command-line agent
   {cmd} compare          Compare finished runs, per model
+  {cmd} skip ["note"]    During run: stop the active model, keep what it built, and move on
+  {cmd} add-judge        Add a judge to a run that has already started
 
 Less common:
 
@@ -94,10 +100,12 @@ Options:
   --task <name>          With new-run or run: use this task instead of the configured one
                          With compare: only this task
   --repeat <n>           With run: do n runs in a row, then compare them
+  --run <id>             With status, report, judge, packet, add-judge: use this run, not the current one
   --force                With freeze, blind: redo. Outputs that depended on the old result
                          are moved to a _stale-<time> folder in the run, not deleted.
                          With judge: ask the api judges again, replacing their answers.
                          With init: overwrite pipeline.json without asking.
+                         With skip: also stop a planner, which ends the run if it has no plan yet.
   --show                 With test: print per-model results (this un-blinds you)
   --allow-sleep          With run: don't keep the machine awake
 
@@ -134,6 +142,8 @@ def next_step(lines):
     print("\nNext:")
     for line in lines:
         print("  " + line)
+    if SELECTED_RUN:
+        print("  (Add --run %s to these commands.)" % SELECTED_RUN)
     print()
 
 
@@ -412,12 +422,18 @@ def stale_proxy_problem(health):
 
 def current_run(cfg):
     root = runs_root(cfg)
-    pointer = os.path.join(root, "CURRENT")
-    if not os.path.exists(pointer):
-        die("There is no current run yet. Start one with:  %s new-run" % CMD)
-    with open(pointer, encoding="utf-8") as fh:
-        run_id = fh.read().strip()
-    path = os.path.join(root, run_id)
+    if SELECTED_RUN:
+        run_id = SELECTED_RUN
+        path = os.path.join(root, run_id)
+        if os.path.basename(run_id) != run_id or not os.path.exists(os.path.join(path, "run.json")):
+            die("There is no run called '%s' in %s." % (run_id, root))
+    else:
+        pointer = os.path.join(root, "CURRENT")
+        if not os.path.exists(pointer):
+            die("There is no current run yet. Start one with:  %s new-run" % CMD)
+        with open(pointer, encoding="utf-8") as fh:
+            run_id = fh.read().strip()
+        path = os.path.join(root, run_id)
     if not os.path.isdir(path):
         die("The current run folder is missing: %s\nStart a new run with:  %s new-run" % (path, CMD))
     with open(os.path.join(path, "run.json"), encoding="utf-8") as fh:
@@ -782,7 +798,7 @@ def ask(prompt, default=None):
     try:
         answer = input("%s%s: " % (prompt, suffix)).strip()
     except EOFError:
-        die("'init' needs answers, but the input ended.")
+        die("This command needs answers, but the input ended.")
     return answer if answer else (default if default is not None else "")
 
 
@@ -844,23 +860,23 @@ def pick_models(prompt, models, taken, many=False, required=True):
             return [{"label": make_label(c, taken), "model": c} for c in chosen]
 
 
-def ask_judges():
-    judges = []
-    say("\nJudges score the anonymous builds. Add as many as you like:")
+def explain_judge_types():
     say("  paste  a cloud LLM in a web chat: you paste the packet in and its answer back")
     say("  api    a cloud LLM called directly with an OpenAI-compatible API")
     say("  human  a person who fills in a score file")
+
+
+def ask_judge(prompt, number, taken):
+    """One judge's details, asking until they make sense. None if the first answer is empty."""
     while True:
-        kind = ask("Judge %d type (paste, api, human; empty to finish)" % (len(judges) + 1), "").lower()
+        kind = ask(prompt, "").lower()
         if not kind:
-            if judges or ask_yes("No judges means no scores in the report. Continue anyway?", False):
-                return judges
-            continue
+            return None
         if kind not in JUDGE_TYPES:
-            say("  Please type paste, api or human.")
+            say("  Please type paste, api or human. You name the judge after that.")
             continue
-        label = ask("  Label", "%s-%d" % (kind, len(judges) + 1)).lower()
-        if not LABEL_RE.match(label) or label in [j["label"] for j in judges]:
+        label = ask("  Label", "%s-%d" % (kind, number)).lower()
+        if not LABEL_RE.match(label) or label in taken:
             say("  Use a new label with lowercase letters, digits, dots, dashes and underscores.")
             continue
         judge = {"label": label, "type": kind}
@@ -871,7 +887,21 @@ def ask_judges():
             if not (judge["base_url"] and judge["model"]):
                 say("  An api judge needs a base URL and a model id. Try again.")
                 continue
-        judges.append(judge)
+        return judge
+
+
+def ask_judges():
+    judges = []
+    say("\nJudges score the anonymous builds. Add as many as you like:")
+    explain_judge_types()
+    while True:
+        number = len(judges) + 1
+        judge = ask_judge("Judge %d type (paste, api, human; empty to finish)" % number, number,
+                          [j["label"] for j in judges])
+        if judge:
+            judges.append(judge)
+        elif judges or ask_yes("No judges means no scores in the report. Continue anyway?", False):
+            return judges
 
 
 def current_agent():
@@ -1746,6 +1776,29 @@ def _human_template(key):
             "## Scores (JSON)\n\n```json\n%s\n```\n" % json.dumps(data, indent=2))
 
 
+def _create_score_file(path, judge, key):
+    """The file a paste or human judge fills in, unless it's already there. api judges get theirs from 'judge'."""
+    score_file = _score_file(path, judge["label"])
+    if os.path.exists(score_file):
+        return
+    if judge["type"] == "paste":
+        with open(score_file, "w", encoding="utf-8") as fh:
+            fh.write("<!-- Paste the complete answer from %s below this line, then save. -->\n\n" % judge["label"])
+    elif judge["type"] == "human":
+        with open(score_file, "w", encoding="utf-8") as fh:
+            fh.write(_human_template(key))
+
+
+def _judge_instructions(path, judge):
+    score_file = _score_file(path, judge["label"])
+    if judge["type"] == "api":
+        return ["%s: run  %s judge" % (judge["label"], CMD)]
+    if judge["type"] == "paste":
+        return ["%s: in a NEW chat, attach judge-packet.md, send 'Follow the instructions in this file.'" % judge["label"],
+                "  and paste the complete answer into %s" % score_file]
+    return ["%s: fill in %s" % (judge["label"], score_file)]
+
+
 def cmd_packet(cfg, _args):
     run_id, path, run = current_run(cfg)
     key = read_blind_key(path)
@@ -1828,35 +1881,68 @@ def cmd_packet(cfg, _args):
     with open(packet, "w", encoding="utf-8") as fh:
         fh.write("\n".join(parts) + "\n")
     for judge in run.get("judges", []):
-        score_file = _score_file(path, judge["label"])
-        if os.path.exists(score_file):
-            continue
-        if judge["type"] == "paste":
-            with open(score_file, "w", encoding="utf-8") as fh:
-                fh.write("<!-- Paste the complete answer from %s below this line, then save. -->\n\n" % judge["label"])
-        elif judge["type"] == "human":
-            with open(score_file, "w", encoding="utf-8") as fh:
-                fh.write(_human_template(key))
+        _create_score_file(path, judge, key)
 
     if missing_reviews:
         warn("These reviews are missing and marked as such in the packet: " + ", ".join(missing_reviews))
     if leaks:
         warn("The packet sections of %s mention a model label. Check them before judging, "
              "because this can un-blind the judges." % ", ".join("Build " + x for x in leaks))
-    set_stage(cfg, run_id, "judging", None)
+    if not SELECTED_RUN:  # an older run must not take over the proxy's labelling from a run in progress
+        set_stage(cfg, run_id, "judging", None)
     say("\nJudge packet created: %s" % packet)
     lines = []
     for judge in run.get("judges", []):
-        score_file = _score_file(path, judge["label"])
-        if judge["type"] == "api":
-            lines.append("%s: run  %s judge" % (judge["label"], CMD))
-        elif judge["type"] == "paste":
-            lines += ["%s: in a NEW chat, attach judge-packet.md, send 'Follow the instructions in this file.'" % judge["label"],
-                      "  and paste the complete answer into %s" % score_file]
-        else:
-            lines.append("%s: fill in %s" % (judge["label"], score_file))
+        lines += _judge_instructions(path, judge)
     lines.append("Then:  %s report" % CMD)
     next_step(lines)
+
+
+def _write_atomically(file_path, data):
+    """Other processes read these files at any moment, and a run may be going."""
+    tmp = file_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, file_path)
+
+
+def cmd_add_judge(cfg, _args):
+    run_id, path, run = current_run(cfg)
+    taken = [j["label"] for j in run.get("judges", [])]
+    say("\nAdding a judge to run %s. Its judges so far: %s" % (run_id, ", ".join(taken) or "none"))
+    explain_judge_types()
+    try:
+        judge = ask_judge("Judge type (paste, api, human; empty to cancel)", len(taken) + 1, taken)
+        if not judge:
+            say("Nothing changed.\n")
+            return
+        also_future = ask_yes("Also use this judge in future runs?", False)
+    except KeyboardInterrupt:
+        say("\nStopped. Nothing was changed.\n")
+        return
+
+    _, path, run = current_run(cfg)  # the questions take a while, and a run may have written this since
+    run.setdefault("judges", []).append(judge)
+    _write_atomically(os.path.join(path, "run.json"), run)
+    ok("Added %s to run %s" % (judge["label"], run_id))
+    if also_future:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            config = json.load(fh)
+        if judge["label"] in [j.get("label") for j in config.get("judges", [])]:
+            warn("%s already lists a judge called %s, so it wasn't changed." % (CONFIG_PATH, judge["label"]))
+        else:
+            config.setdefault("judges", []).append(judge)
+            _write_atomically(CONFIG_PATH, config)
+            ok("Added %s to %s" % (judge["label"], CONFIG_PATH))
+    if judge["type"] == "api" and judge.get("api_key_env") and not os.environ.get(judge["api_key_env"]):
+        warn("Set the environment variable %s before you run 'judge'." % judge["api_key_env"])
+
+    if os.path.exists(os.path.join(path, "4-judging", "judge-packet.md")):
+        _create_score_file(path, judge, read_blind_key(path))
+        next_step(_judge_instructions(path, judge) + ["Then:  %s report" % CMD])
+    else:
+        say("Its score file appears when this run makes the judge packet.\n")
 
 
 def cmd_judge(cfg, args):
@@ -2156,6 +2242,13 @@ def cmd_report(cfg, _args):
             lines.append("- `%s`: no usable scores yet." % judge["label"])
     if not run.get("judges"):
         lines.append("No judges configured.")
+    known = {"scores-%s.md" % j["label"] for j in run.get("judges", [])}
+    judging_dir = os.path.join(path, "4-judging")
+    for name in sorted(os.listdir(judging_dir)) if os.path.isdir(judging_dir) else []:
+        if fnmatch.fnmatch(name, "scores-*.md") and name not in known:
+            message = "`%s` belongs to no judge in this run, so it isn't counted. To count it: `%s add-judge`." % (name, CMD)
+            lines.append("- " + message)
+            warn(message)
     if judges:
         lines += ["", "### Builds (1–5 per criterion, total out of 25)", "",
                   "| Build | Model | Judge | " + " | ".join(c.replace("_", " ") for c in CRITERIA) + " | Total |",
@@ -2295,8 +2388,9 @@ def cmd_compare(cfg, args):
         mode = shlex.join(agent) if agent and _read_stage_results(path) else "manual"
         pinned = json.dumps(run.get("request_overrides") or {}, sort_keys=True)
         group = groups.setdefault((run.get("task"), hashes.get("task"), hashes.get("prompts"),
-                                   hashes.get("scoring"), mode, pinned), {"runs": 0, "models": {}})
+                                   hashes.get("scoring"), mode, pinned), {"runs": 0, "models": {}, "judges": set()})
         group["runs"] += 1
+        group["judges"].add(tuple(sorted(j.get("label", "") for j in run.get("judges", []))))
         key = read_blind_key(path) or {"builds": {}}
         letter_of = {label: letter for letter, label in key["builds"].items()}
         try:
@@ -2335,6 +2429,9 @@ def cmd_compare(cfg, args):
                 label, len(model["passed"]), model["failed"], tests_text, len(model["judged"]),
                 _spread(model["judged"]), _f(_median(model["speed"]))))
         lines.append("")
+        if len(group["judges"]) > 1:
+            lines += ["**These runs had different judges, so their judge totals may not compare:** %s." % "; ".join(
+                sorted(", ".join(judges) or "none" for judges in group["judges"])), ""]
     lines += ["Values are the mean, with the lowest and highest in brackets. A failed build counts as 0 tests passed. "
               "Speed is the median across runs."]
     if any(len(model["passed"]) < 5 for group in groups.values() for model in group["models"].values()):
@@ -2489,6 +2586,37 @@ def _stop_proxy(proxy):
             proxy.wait()
 
 
+def _read_skip_request(skip_path):
+    try:
+        with open(skip_path, encoding="utf-8") as fh:
+            request = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return request if isinstance(request, dict) else {}
+
+
+def cmd_skip(cfg, args):
+    root = runs_root(cfg)
+    run_pid = _read_pid(os.path.join(root, "run.pid"))
+    agent_pid = _read_pid(os.path.join(root, "agent.pid"))
+    if not (run_pid and _pid_alive(run_pid) and agent_pid and _pid_alive(agent_pid, group=True)):
+        die("No agent is working right now, so there's nothing to skip. This only works during '%s run'." % CMD)
+    stage = get_stage(cfg).get("stage") or ""
+    if stage == "plan" and not args.force:
+        die("This is the planner. Without a plan the run ends, because everything depends on it. "
+            "To stop it anyway:  %s skip --force" % CMD)
+    note = " ".join((args.label or "").split()).replace("|", "/")[:200]
+    skip_path = os.path.join(root, SKIP_REQUEST)
+    _write_atomically(skip_path, {"stage": stage, "note": note})
+    deadline = time.monotonic() + 15
+    while os.path.exists(skip_path) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if os.path.exists(skip_path):
+        warn("'run' hasn't picked this up yet. Look at its window.")
+    else:
+        ok("Stopping %s. The run carries on, and the report will say this was stopped by hand." % stage)
+
+
 def _run_agent(cfg, agent, path, name, folder):
     """One agent process for one stage, until it exits or stops making progress."""
     values = {"{folder}": folder, "{base_url}": proxy_url(cfg) + "/v1", "{model}": served_name(cfg)}
@@ -2505,6 +2633,8 @@ def _run_agent(cfg, agent, path, name, folder):
     log_dir = os.path.join(path, "agent-logs")
     os.makedirs(log_dir, exist_ok=True)
     pid_path = os.path.join(runs_root(cfg), "agent.pid")
+    skip_path = os.path.join(runs_root(cfg), SKIP_REQUEST)
+    _remove_file(skip_path)  # anything still there was meant for a stage that has ended
     kwargs = {"start_new_session": True} if os.name != "nt" else {}
     outcome = {"exit_code": None, "stopped": None, "error": None, "seconds": 0, "slept_s": 0}
     started = time.monotonic()
@@ -2525,11 +2655,18 @@ def _run_agent(cfg, agent, path, name, folder):
                 # A call in flight counts as activity: local models can think for minutes before the first token.
                 clock.tick(time.time(), time.monotonic(), seq != last_seq or in_flight > 0)
                 last_seq = seq
+                request = _read_skip_request(skip_path)
+                if request is not None:
+                    _remove_file(skip_path)
+                    if request.get("stage") == name:  # a late request must not stop the next model
+                        note = request.get("note")
+                        outcome["stopped"] = "stopped by hand: %s" % note if note else "stopped by hand"
+                        break
                 if clock.awake > stage_limit:
-                    outcome["stopped"] = "reached the stage limit of %d s" % stage_limit
+                    outcome["stopped"] = "stopped: reached the stage limit of %d s" % stage_limit
                     break
                 if clock.idle > idle_limit:
-                    outcome["stopped"] = "no model call for %d s" % idle_limit
+                    outcome["stopped"] = "stopped: no model call for %d s" % idle_limit
                     break
             outcome["exit_code"] = proc.poll()
         finally:
@@ -2574,7 +2711,7 @@ def _settle_stage(cfg, run_id, name, folder, kind, outcome, since):
     result = {"status": "done", "reason": "", "flags": [], "model_calls": calls,
               "seconds": round(outcome["seconds"], 1), "exit_code": outcome["exit_code"]}
     if outcome["stopped"]:
-        result["flags"].append("stopped: " + outcome["stopped"])
+        result["flags"].append(outcome["stopped"])
     elif outcome["exit_code"]:
         result["flags"].append("agent exited with code %s" % outcome["exit_code"])
     if outcome["slept_s"]:
@@ -2685,6 +2822,11 @@ def _resumable_run(cfg):
     return run_id
 
 
+def _read_run(path):
+    with open(os.path.join(path, "run.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _run_steps(cfg, args, run_id, path, run, agent):
     """Work through the run until it has a report. Returns the process's exit code."""
     harness_args = argparse.Namespace(force=False, show=False)
@@ -2693,6 +2835,7 @@ def _run_steps(cfg, args, run_id, path, run, agent):
     proxy = None
     try:
         while True:
+            run = _read_run(path)  # add-judge may have changed it
             step, detail = _pending_step(path, run)
             if step == "stage":
                 proxy = _ensure_proxy(cfg, proxy)
@@ -2791,8 +2934,7 @@ def cmd_run(cfg, args):
             if "agent_version" not in run:
                 run["agent"] = run.get("agent") or agent
                 run["agent_version"] = agent_version(run["agent"]["command"])
-                with open(os.path.join(path, "run.json"), "w", encoding="utf-8") as fh:
-                    json.dump(run, fh, indent=2)
+                _write_atomically(os.path.join(path, "run.json"), run)
             try:
                 codes.append(_run_steps(cfg, args, run_id, path, run, run["agent"]))
             except SystemExit as exc:
@@ -2828,6 +2970,7 @@ def main():
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--allow-sleep", action="store_true")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--run", dest="run_id")
     args = parser.parse_args()
 
     commands = {
@@ -2835,6 +2978,7 @@ def main():
         "start": cmd_start, "status": cmd_status, "load": cmd_load, "smoke": cmd_smoke,
         "freeze": cmd_freeze, "test": cmd_test, "blind": cmd_blind, "packet": cmd_packet,
         "judge": cmd_judge, "report": cmd_report, "run": cmd_run, "compare": cmd_compare,
+        "skip": cmd_skip, "add-judge": cmd_add_judge,
     }
     if args.command == "init":
         try:
@@ -2851,6 +2995,11 @@ def main():
         die("Tell me which model to load, e.g.:  %s load <label>" % CMD)
     if args.command == "start" and not args.label:
         die("Tell me which stage to start, e.g.:  %s start plan" % CMD)
+    if args.run_id:
+        if args.command not in RUN_OPTION_COMMANDS:
+            die("--run only works with: %s." % ", ".join(RUN_OPTION_COMMANDS))
+        global SELECTED_RUN
+        SELECTED_RUN = args.run_id
     commands[args.command](load_config(), args)
 
 

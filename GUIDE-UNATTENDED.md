@@ -292,8 +292,9 @@ python pipeline.py run --task toy-bepay
 ```
 
 `run` starts the proxy by itself when none is running, and stops that one when it ends. Once a run has a
-report, the next `run` starts a new one. To change models or judges, run `python pipeline.py init` again. It
-offers to keep your agent, so you can press Enter at that question.
+report, the next `run` starts a new one. To change models or judges for new runs, run `python pipeline.py init`
+again. It offers to keep your agent, so you can press Enter at that question. To add a judge to a run that has
+already started, use `python pipeline.py add-judge`.
 
 **Comparing runs?** Keep the agent, its version, the judges and the power setup the same. Don't compare
 scores directly with manual runs, because a command-line agent can behave differently from an editor one.
@@ -324,7 +325,8 @@ scoring sheet, agent or pinned settings go in separate tables, because their res
 
 - **Judges:** with `paste` judges, each run waits for two more chats from you, so judging many runs by hand
   is a lot of copying. `api` judges suit this better. Without judges, you still get tests and speed for every
-  run, and any you judge later show up in `compare`.
+  run, and any you judge later show up in `compare`. To judge an earlier run, add `--run <id>` to `status`,
+  `add-judge`, `judge` and `report`.
 - **Time:** multiply. A toy run often takes 30–60 minutes.
 - **The same plan for several builds:** to measure one model against itself with the planner held still,
   list it twice under `builders` in `pipeline.json`, with a different `label` each time. `init` can't do this,
@@ -349,11 +351,32 @@ Nothing is retried, because that would give one model a chance the others didn't
 | Nothing has happened for `idle_timeout_s`, or the stage hits `stage_timeout_s` | The agent and everything it started are stopped. Any output counts, and the report says so. A model call in progress is never "idle", however slow, so only `stage_timeout_s` can end a stuck call. |
 | A model won't load | That stage fails, and the run carries on. A planner that won't load stops the run. |
 | An `api` judge fails | The report is still written. Run `python pipeline.py judge`, then `report`. |
+| You run `skip` | That stage stops and the run moves on. See [If a model gets stuck](#if-a-model-gets-stuck). |
 
 Each stage's agent output is in `agent-logs/` in the run's folder, which is the first place to look.
 
 The exit code is 0 when the report is written, even if some stages failed, so always read the report. It
 is 1 if the plan or every build failed or an `api` judge failed, and 130 if the run was stopped.
+
+## If a model gets stuck
+
+A model can loop until it reaches `stage_timeout_s`. If you're watching and it's clearly stuck, stop just that
+model, from another window with the environment activated:
+
+```bash
+python pipeline.py skip "stuck in a loop on its own tests"
+```
+
+The agent and anything it started are stopped, and the run moves on to the next stage. It's treated the same
+as reaching the limit: whatever the model built is committed, tested, reviewed and judged. The report's
+*Notes* column says `stopped by hand: <note>`, because this was your decision and not the model's result.
+Judges don't see the note.
+
+- A review that hasn't been written yet fails, and the run carries on.
+- A planner needs `skip --force`, because the run ends without a plan.
+- The note is optional.
+- `skip` needs someone awake. Overnight, `stage_timeout_s` is the limit, so lower it if time matters. A cap on
+  `max_tokens` also helps with a single answer that never ends. See [Pinning model settings](#pinning-model-settings).
 
 ## If a run is interrupted
 
@@ -513,5 +536,7 @@ powercfg /change hibernate-timeout-ac 0
 | `set the environment variable ... first` | An `api` judge needs its key. Use `export` in this window, then start again. |
 | `Run ... isn't finished` | You gave `--task` while another run is unfinished. Finish it with `python pipeline.py run`, or use `new-run --task <name>` and then `run`. |
 | A certificate error from a server or an `api` judge | Apple's built-in Python uses an old TLS library, which may be the cause. Check with `python -c "import ssl; print(ssl.OPENSSL_VERSION)"`. If it says `LibreSSL`, try making the `.venv` with a Python from python.org or Homebrew. |
-| A score file isn't counted | Every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. |
+| A score file isn't counted | Every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. If the report says it belongs to no judge, add that judge with `python pipeline.py add-judge`. |
+| You left a judge out at `init`, or want another one | Use `python pipeline.py add-judge`, at any point in a run or after its report. Add `--run <id>` for an earlier run. |
+| A model is stuck in a loop | See [If a model gets stuck](#if-a-model-gets-stuck). |
 | Something else | More answers are in the [manual guide's troubleshooting](GUIDE-MANUAL.md#troubleshooting). |

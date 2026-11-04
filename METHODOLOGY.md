@@ -177,6 +177,11 @@ a few tests or points in a single run may be chance. Repeat runs before you beli
 don't treat a report as a ranking. `run --repeat` and `compare` show the mean and spread across runs,
 and keep runs with different tasks, prompts, scoring or agents apart. They don't test for significance.
 
+**Stopping a model by hand is a human decision.** `skip` ends a stage early, and a person chooses which
+stage and when. A stopped build is scored on what it had at that moment, the same as a build that reached the
+stage limit, and the report says it was stopped by hand. Its score is a snapshot, not its best work. Judges
+aren't told, so they score the code as it stands.
+
 **The task set is small and Python-centred.** Three tasks can't describe a model. All are small,
 self-contained Python packages with a clear spec, which favours models good at exactly that. Long
 refactors, large unfamiliar codebases and vague requirements are not tested. `toy-bepay` also has

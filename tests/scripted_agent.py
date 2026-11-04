@@ -96,6 +96,10 @@ def main():
     if mode == "hang":
         start_child()
         time.sleep(600)
+    elif mode == "work-then-hang":
+        run_agent(folder, args.base_url, args.model, commit=False)
+        start_child()
+        time.sleep(600)
     elif mode == "no-calls":
         write_without_model(folder)
     elif mode == "nothing":

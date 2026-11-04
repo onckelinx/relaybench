@@ -341,6 +341,9 @@ numbered code, and then every review, labelled only by letter. Then, for each ju
 **Check:** `python pipeline.py status` shows `Judge scores complete (n of n)`. If a judge is missing,
 its file has no JSON section with all scores from 1 to 5.
 
+**Want another judge?** Each run keeps its own list of judges, so changing `pipeline.json` won't add one. Use
+`python pipeline.py add-judge`, which creates the score file too. Add `--run <id>` for an earlier run.
+
 ### 9. Write the report
 
 ```bash
@@ -467,7 +470,8 @@ and watch for `blind` warnings.
 | A model loops or ignores its tools | Cancel, nudge it once, and note it in the report. |
 | `The running proxy ... was started before the code last changed` | You updated relaybench while a proxy was running. Stop it with `Ctrl+C` and start it again. |
 | `Address already in use` starting the proxy | A proxy is already running, or `proxy_port` is taken. Use that one, or choose another port in both the config and the agent. |
-| A score file isn't counted | Every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. |
+| You left a judge out at `init`, or want another one | Use `python pipeline.py add-judge`, at any point in a run or after its report. Add `--run <id>` for an earlier run. |
+| A score file isn't counted | If the report says it belongs to no judge, use `python pipeline.py add-judge`. Otherwise, every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. |
 | `judge` fails with a 400 about tokens or length | The packet may be too large for that model. Try a model with more context, or add `"max_tokens"` to the judge if its API requires it. |
 | The machine gets very slow | Close other heavy apps. In LM Studio, check that only one model is loaded: `lms ps`. |
 
@@ -485,6 +489,7 @@ python pipeline.py test       # after the builds
 python pipeline.py blind      # before the reviews
 python pipeline.py packet     # after the reviews
 python pipeline.py judge      # call the api judges
+python pipeline.py add-judge  # add a judge to a run that has already started
 python pipeline.py report     # after the judges
 python pipeline.py compare    # across finished runs
 ```

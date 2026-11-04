@@ -903,7 +903,7 @@ def test_scores_validation(make_stack):
     report = stack.text_in_run("REPORT.md")
     assert "`judge-a`: Build B incomplete" in report
     assert "`judge-c`: no usable scores yet" in report
-    assert "stray" not in report
+    assert "`scores-stray.md` belongs to no judge in this run" in report and "| stray |" not in report
     # All criteria 4 is 20. An average of 20 for B proves judge-a's gap wasn't counted as 0.
     averages = re.findall(r"\*\*average\*\* \| \| \| \| \| \| \*\*([\d.]+)\*\*", report)
     assert averages == ["20.0", "20.0"]
@@ -1798,3 +1798,206 @@ def test_harness_commit_says_when_files_have_changed(tmp_path):
     with open(str(repo / "pipeline.py"), "a", encoding="utf-8") as fh:
         fh.write("# changed\n")
     assert commit().endswith(" (with uncommitted changes)")
+
+
+def run_output(stack):
+    with open(os.path.join(stack.state, "run-output.log"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def paste_answer(stack, label, value):
+    key = stack.json_in_run("blind-key.json")
+    builds = {letter: {c: value for c in ("correctness", "plan_adherence", "code_quality", "edge_cases", "own_tests")}
+              for letter in key["builds"]}
+    with open(os.path.join(stack.run_dir(), "4-judging", "scores-%s.md" % label), "a", encoding="utf-8") as fh:
+        fh.write("Reasons.\n\n```json\n%s\n```\n" % json.dumps({"builds": builds, "reviews": {}, "preferred_build": "A",
+                                                                "one_line_verdict": "From %s." % label}))
+
+
+@posix_only
+def test_skip_keeps_the_work_and_moves_on_and_add_judge_works_during_a_run(make_stack):
+    stack = unattended(make_stack, "2-build-1:work-then-hang", idle_timeout_s=120, reviewers=[],
+                       judges=[{"label": "gpt", "type": "paste"}])
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    assert wait_until(lambda: os.path.exists(stack.env["SCRIPTED_AGENT_CHILD"]) and
+                      os.path.getsize(stack.env["SCRIPTED_AGENT_CHILD"]))
+    assert stack.load_stage() == "build-mock-good"
+    child = child_pid(stack.env["SCRIPTED_AGENT_CHILD"])
+
+    # There is no packet yet, so its score file has to wait, and the run must notice the new judge.
+    out = stack.cli("add-judge", stdin="paste\nclaude\nn\n")
+    assert "appears when this run makes the judge packet" in out
+    assert [j["label"] for j in stack.json_in_run("run.json")["judges"]] == ["gpt", "claude"]
+
+    # A request for another stage is dropped, and stops nothing.
+    request = os.path.join(stack.runs, "skip-request.json")
+    with open(request, "w", encoding="utf-8") as fh:
+        json.dump({"stage": "build-somebody-else", "note": "late"}, fh)
+    assert wait_until(lambda: not os.path.exists(request))
+    assert alive(child) and proc.poll() is None and stack.load_stage() == "build-mock-good"
+
+    assert "Stopping build-mock-good" in stack.cli("skip", "stuck | in a\nloop")
+    proc.wait(timeout=120)
+    output = run_output(stack)
+    assert proc.returncode == 0, output
+    assert not alive(child), "what the agent started must stop too"
+    assert not os.path.exists(request) and not os.path.exists(os.path.join(stack.runs, "agent.pid"))
+
+    stopped = stage_result(stack, "build-mock-good")
+    assert stopped["status"] == "done" and stopped["model_calls"] > 0
+    assert "stopped by hand: stuck / in a loop" in stopped["flags"]
+    assert "the agent didn't commit its work, so the harness did" in stopped["flags"]
+    assert stage_result(stack, "build-mock-buggy")["status"] == "done", "the next model must still get its turn"
+    assert stack.summary()["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"], "what it built still counts"
+
+    report = stack.text_in_run("REPORT.md")
+    assert "stopped by hand: stuck / in a loop" in report
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert "stuck" not in packet and "by hand" not in packet
+
+    # The run kept up with the judge added while it was going.
+    assert "claude (paste)" in output and "gpt (paste)" in output
+    assert os.path.exists(os.path.join(stack.run_dir(), "4-judging", "scores-claude.md"))
+
+
+def test_skip_with_nothing_running(make_stack):
+    stack = unattended(make_stack)
+    assert "nothing to skip" in stack.cli("skip", "too late", expect=1)
+    assert not os.path.exists(os.path.join(stack.runs, "skip-request.json"))
+
+
+@posix_only
+def test_skip_asks_before_stopping_a_planner(make_stack):
+    stack = unattended(make_stack, "1-plan:hang", idle_timeout_s=120, judges=[])
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    assert wait_until(lambda: os.path.exists(stack.env["SCRIPTED_AGENT_CHILD"]) and
+                      os.path.getsize(stack.env["SCRIPTED_AGENT_CHILD"]))
+    assert "This is the planner" in stack.cli("skip", expect=1)
+    assert proc.poll() is None, "it must still be running"
+    stack.cli("skip", "--force")
+    proc.wait(timeout=60)
+    assert proc.returncode == 1 and "The plan stage failed" in run_output(stack)
+    assert "stopped by hand" in stage_result(stack, "plan")["flags"]
+
+
+@posix_only
+def test_skip_during_a_review_fails_only_that_review(make_stack):
+    stack = unattended(make_stack, "3-review:hang", idle_timeout_s=120, judges=[], builders=[
+        {"label": "mock-good", "model": "mock-good"}])
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    assert wait_until(lambda: os.path.exists(stack.env["SCRIPTED_AGENT_CHILD"]) and
+                      os.path.getsize(stack.env["SCRIPTED_AGENT_CHILD"]), seconds=60)
+    stage = stack.load_stage()
+    assert stage.startswith("review-")
+    stack.cli("skip", "reviewer stuck")
+    assert proc.wait(timeout=60) == 0
+    result = stage_result(stack, stage)
+    assert result["status"] == "failed" and "stopped by hand: reviewer stuck" in result["flags"]
+    assert os.path.exists(os.path.join(stack.run_dir(), "REPORT.md"))
+
+
+def test_add_judge_after_the_report(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+    paste_answer(stack, "gpt", 4)
+    gpt_file = stack.text_in_run("4-judging", "scores-gpt.md")
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+
+    # A name instead of a type, then a label that's taken, then the real thing.
+    out = stack.cli("add-judge", stdin="claude\npaste\nGPT\npaste\nclaude\nn\n")
+    assert "You name the judge after that" in out and "Use a new label" in out
+    assert "scores-claude.md" in out and "report" in out
+    assert [j["label"] for j in stack.json_in_run("run.json")["judges"]] == ["gpt", "claude"]
+    assert "Paste the complete answer from claude" in stack.text_in_run("4-judging", "scores-claude.md")
+    assert stack.text_in_run("4-judging", "scores-gpt.md") == gpt_file
+    assert stack.text_in_run("4-judging", "judge-packet.md") == packet
+    assert "(1 of 2)" in stack.cli("status")
+
+    # Not asked to be added for future runs.
+    assert [j["label"] for j in stack.load_config()["judges"]] == ["gpt"]
+
+    stack.cli("report")
+    assert "`claude`: no usable scores yet" in stack.text_in_run("REPORT.md")
+    paste_answer(stack, "claude", 2)
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "| claude |" in report and "| gpt |" in report and "no usable scores yet" not in report
+    assert "(2 of 2)" in stack.cli("status")
+
+
+def test_add_judge_of_each_other_type_and_for_future_runs(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+
+    # Cancelling changes nothing.
+    assert "Nothing changed" in stack.cli("add-judge", stdin="\n")
+    assert len(stack.json_in_run("run.json")["judges"]) == 1
+
+    stack.cli("add-judge", stdin="human\nrik\ny\n")
+    assert "null" in stack.text_in_run("4-judging", "scores-rik.md")
+    assert [j["label"] for j in stack.load_config()["judges"]] == ["gpt", "rik"]
+    fill_human_scores(os.path.join(stack.run_dir(), "4-judging", "scores-rik.md"))
+
+    answers = "\n".join(["api", "judge-new", stack.mock_url + "/v1", "mock-judge", "MOCK_JUDGE_KEY", "n", ""])
+    assert "judge" in stack.cli("add-judge", stdin=answers)
+    assert not os.path.exists(os.path.join(stack.run_dir(), "4-judging", "scores-judge-new.md"))
+    stack.cli("judge")
+    assert os.path.exists(os.path.join(stack.run_dir(), "4-judging", "scores-judge-new.md"))
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "| rik |" in report and "| judge-new |" in report
+
+    # The next run starts with the judge that was kept for the future.
+    stack.cli("new-run")
+    assert [j["label"] for j in stack.json_in_run("run.json")["judges"]] == ["gpt", "rik"]
+
+
+def test_run_option_works_on_an_older_run(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+    first = os.path.basename(stack.run_dir())
+    stack.cli("run", "--allow-sleep")
+    second = os.path.basename(stack.run_dir())
+    assert first != second
+
+    stack.cli("add-judge", "--run", first, stdin="paste\nclaude\nn\n")
+    with open(os.path.join(stack.runs, first, "run.json"), encoding="utf-8") as fh:
+        assert [j["label"] for j in json.load(fh)["judges"]] == ["gpt", "claude"]
+    assert [j["label"] for j in stack.json_in_run("run.json")["judges"]] == ["gpt"], "the current run must not change"
+    assert os.path.basename(stack.run_dir()) == second, "and it must stay the current one"
+
+    status = stack.cli("status", "--run", first)
+    assert first in status and "(0 of 2)" in status and "--run %s" % first in status
+    stack.cli("packet", "--run", first)
+    with open(os.path.join(stack.logs, "current-stage.json"), encoding="utf-8") as fh:
+        assert json.load(fh)["run_id"] == second, "an older run must not take over the proxy's labelling"
+    stack.cli("report", "--run", first)
+    with open(os.path.join(stack.runs, first, "REPORT.md"), encoding="utf-8") as fh:
+        assert "`claude`: no usable scores yet" in fh.read()
+    assert "`claude`" not in stack.text_in_run("REPORT.md")
+
+    assert "different judges" in stack.cli("compare")
+
+    assert "There is no run called" in stack.cli("status", "--run", "no-such-run", expect=1)
+    # This path leads to a real run, but a run id is a name, not a way to reach other folders.
+    assert "There is no run called" in stack.cli(
+        "status", "--run", os.path.join("..", os.path.basename(stack.runs), second), expect=1)
+    assert "--run only works with" in stack.cli("next", "--run", first, expect=1)
+
+
+@posix_only
+def test_api_judge_added_during_a_run_is_called_by_that_run(make_stack):
+    stack = unattended(make_stack, "2-build-1:work-then-hang", idle_timeout_s=120, reviewers=[], judges=[])
+    stack.env["SCRIPTED_AGENT_CHILD"] = os.path.join(stack.state, "child.pid")
+    proc = start_run_in_background(stack, "--allow-sleep")
+    assert wait_until(lambda: os.path.exists(stack.env["SCRIPTED_AGENT_CHILD"]) and
+                      os.path.getsize(stack.env["SCRIPTED_AGENT_CHILD"]))
+    stack.cli("add-judge", stdin="\n".join(["api", "judge-new", stack.mock_url + "/v1", "mock-judge",
+                                            "MOCK_JUDGE_KEY", "n", ""]))
+    stack.cli("skip")
+    assert proc.wait(timeout=120) == 0, run_output(stack)
+    assert "| judge-new |" in stack.text_in_run("REPORT.md")
+    assert "stopped by hand" in stage_result(stack, "build-mock-good")["flags"]
