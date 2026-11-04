@@ -112,6 +112,11 @@ Vague reviews and loose scoring were the weakest part of the first real run, so 
 - **Own tests** are run with pytest, and judges are told so, because pytest also collects plain `test_`
   functions that `unittest` would miss.
 
+An optional `cross-check` gives judges each other's reports, under neutral names, with the hidden test source.
+In a real run this found a mix-up between two builds and bugs that one judge had missed. It also showed why
+the answers are only notes: judges who couldn't see the test source claimed that existing tests were missing,
+and scores from a second round would be anchored on the other judge.
+
 Changing the prompts or the scoring sheet changes their hashes in the report, and `compare` keeps runs with
 different hashes or different pinned settings apart.
 

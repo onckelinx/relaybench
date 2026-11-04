@@ -66,7 +66,7 @@ AGENT_EXAMPLE = """  "agent": { "command": ["my-agent", "--some-auto-approve-fla
 UNATTENDED = False
 # From --run: work on this run instead of the current one.
 SELECTED_RUN = None
-RUN_OPTION_COMMANDS = ("status", "report", "judge", "packet", "add-judge")
+RUN_OPTION_COMMANDS = ("status", "report", "judge", "packet", "add-judge", "cross-check")
 SKIP_REQUEST = "skip-request.json"
 # Only explains the report, and changes no test, so it stays out of the task hash.
 TEST_GROUPS = "test_groups.json"
@@ -90,6 +90,7 @@ Commands (run them from the repository folder):
   {cmd} compare          Compare finished runs, per model
   {cmd} skip ["note"]    During run: stop the active model, keep what it built, and move on
   {cmd} add-judge        Add a judge to a run that has already started
+  {cmd} cross-check      Optional: a packet for judges to check each other's reports, as notes only
 
 Less common:
 
@@ -102,7 +103,8 @@ Options:
   --task <name>          With new-run or run: use this task instead of the configured one
                          With compare: only this task
   --repeat <n>           With run: do n runs in a row, then compare them
-  --run <id>             With status, report, judge, packet, add-judge: use this run, not the current one
+  --run <id>             With status, report, judge, packet, add-judge, cross-check: use this run,
+                         not the current one
   --force                With freeze, blind: redo. Outputs that depended on the old result
                          are moved to a _stale-<time> folder in the run, not deleted.
                          With judge: ask the api judges again, replacing their answers.
@@ -1929,6 +1931,95 @@ def cmd_packet(cfg, _args):
     next_step(lines)
 
 
+# Here and not in prompts/: that folder is hashed, and an optional step must not separate results in compare.
+CROSS_CHECK_INSTRUCTIONS = """# Your role: checking the judges
+
+Several judges scored the same builds separately, and their reports are below. Check those reports against the
+code. This is a second opinion for the person running the benchmark: your answer is kept as notes, and it
+changes no score.
+
+This packet contains, in order:
+
+1. The **source of the hidden tests**, which the judges only saw the results of.
+2. The **judges' reports**.
+3. The **original judge packet**, with the code and test results. Its instructions and required format were
+   for the judges, and don't apply to you.
+
+What to do:
+
+- Read the code and tests yourself before you agree or disagree with a claim, and point to file names and lines.
+- If you scored this run yourself, one of these reports may be yours. Hold it to the same standard.
+- Check the hidden test source before you say that a test is missing.
+- Do not speculate about which AI model wrote which build or report.
+
+Answer in Markdown, directly as your reply, with these headings:
+
+## Wrong claims
+Claims in a report that the code or tests show to be wrong, and which report made them.
+
+## Missed problems
+Real problems in a build that a report missed, and which report missed them.
+
+## Scores in doubt
+Scores that look too high or too low, given the scoring sheet in the packet, and why.
+
+## Gaps in the hidden tests
+Requirements in the task that the hidden tests don't check, if you found any.
+"""
+
+
+def cmd_cross_check(cfg, _args):
+    run_id, path, run = current_run(cfg)
+    key = read_blind_key(path)
+    judge_dir = os.path.join(path, "4-judging")
+    packet_path = os.path.join(judge_dir, "judge-packet.md")
+    if not os.path.exists(packet_path):
+        die("Create the judge packet first:  %s packet" % CMD)
+    scored = [j for j in run.get("judges", []) if _judge_scores(path, j, key)["usable"]]
+    if len(scored) < 2:
+        die("A cross-check needs at least two judges with scores, and this run has %d." % len(scored))
+
+    def read(file_path):
+        with open(file_path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+
+    parts = [CROSS_CHECK_INSTRUCTIONS.strip(), "", "---", "", "# The source of the hidden tests", ""]
+    hidden = os.path.join(task_dir(cfg, run["task"]), "hidden_tests")
+    for name in sorted(os.listdir(hidden)) if os.path.isdir(hidden) else []:
+        if name.endswith(".py"):
+            parts += ["### `%s`" % name, "", "````python", read(os.path.join(hidden, name)), "````", ""]
+
+    parts += ["---", "", "# The judges' reports", ""]
+    # Numbers, not labels: who wrote a report shouldn't colour how it is read.
+    names = []
+    for number, judge in enumerate(scored, start=1):
+        names.append("Judge %d = %s" % (number, judge["label"]))
+        report = re.sub(r"\A\s*<!--.*?-->\s*", "", read(_score_file(path, judge["label"])), flags=re.DOTALL)
+        parts += ["## Judge %d" % number, "", "<report>", report, "</report>", ""]
+    parts += ["---", "", "# The original judge packet", "", read(packet_path), ""]
+
+    output = os.path.join(judge_dir, "cross-check-packet.md")
+    with open(output, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(parts))
+    labels = [m["label"] for m in all_models(run)]
+    if find_label_text("\n".join(parts), labels):
+        warn("The packet mentions a model label, which can un-blind whoever reads it. Check it before you send it.")
+
+    notes = []
+    for judge in scored:
+        note_file = os.path.join(judge_dir, "cross-check-%s.md" % judge["label"])
+        if not os.path.exists(note_file):
+            with open(note_file, "w", encoding="utf-8") as fh:
+                fh.write("<!-- Paste the answer from %s below this line, then save. This is never scored. -->\n\n" % judge["label"])
+        notes.append(note_file)
+    say("\nCross-check packet created: %s" % output)
+    say("In that packet: " + ", ".join(names))
+    next_step(["For each judge you want a second opinion from: in a NEW chat, attach cross-check-packet.md and send",
+               "  'Follow the instructions in this file.'",
+               "Keep the answers as notes in:"] + ["  " + note for note in notes] +
+              ["These are never scored, so no other command is needed."])
+
+
 def _write_atomically(file_path, data):
     """Other processes read these files at any moment, and a run may be going."""
     tmp = file_path + ".tmp"
@@ -3067,7 +3158,7 @@ def main():
         "start": cmd_start, "status": cmd_status, "load": cmd_load, "smoke": cmd_smoke,
         "freeze": cmd_freeze, "test": cmd_test, "blind": cmd_blind, "packet": cmd_packet,
         "judge": cmd_judge, "report": cmd_report, "run": cmd_run, "compare": cmd_compare,
-        "skip": cmd_skip, "add-judge": cmd_add_judge,
+        "skip": cmd_skip, "add-judge": cmd_add_judge, "cross-check": cmd_cross_check,
     }
     if args.command == "init":
         try:

@@ -490,6 +490,7 @@ python pipeline.py blind      # before the reviews
 python pipeline.py packet     # after the reviews
 python pipeline.py judge      # call the api judges
 python pipeline.py add-judge  # add a judge to a run that has already started
+python pipeline.py cross-check  # optional: judges check each other's reports, as notes only
 python pipeline.py report     # after the judges
 python pipeline.py compare    # across finished runs
 ```

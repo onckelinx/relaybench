@@ -2134,3 +2134,52 @@ def test_judge_notes_leave_out_reviews_that_were_never_written(tmp_path):
 def test_the_groups_file_counts_as_something_a_model_should_not_see():
     module = load_pipeline_module()
     assert "test_groups" in module.stage_sentinels("/x", {"builders": [{"label": "a"}]}, "build", "a")
+
+
+def test_cross_check_packet_is_blind_complete_and_never_scored(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"}, {"label": "claude", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+
+    # Fewer than two judges with scores: nothing to compare.
+    assert "needs at least two judges with scores, and this run has 0" in stack.cli("cross-check", expect=1)
+    paste_answer(stack, "gpt", 4)
+    assert "and this run has 1" in stack.cli("cross-check", expect=1)
+    paste_answer(stack, "claude", 2)
+    stack.cli("report")
+    report_before = stack.text_in_run("REPORT.md")
+
+    out = stack.cli("cross-check")
+    assert "Judge 1 = gpt" in out and "Judge 2 = claude" in out
+    packet = stack.text_in_run("4-judging", "cross-check-packet.md")
+    judge_packet = stack.text_in_run("4-judging", "judge-packet.md")
+    with open(os.path.join(ROOT, "tasks", "toy-bepay", "hidden_tests", "test_hidden.py"), encoding="utf-8") as fh:
+        assert fh.read().strip() in packet, "the hidden test source must be in there"
+    assert judge_packet.strip() in packet, "and the original packet"
+    assert "From gpt." in packet and "From claude." in packet, "and both reports"
+    assert "Paste the complete answer" not in packet.split("# The original judge packet")[0]
+
+    # Blind: no model names, and reports go by number rather than the judge's name.
+    for label in ("mock-good", "mock-buggy", "mock-planner"):
+        assert label not in packet, label
+    assert "## Judge 1" in packet and "## Judge 2" in packet
+    assert "## gpt" not in packet and "## claude" not in packet
+
+    # Answers are kept, and change nothing.
+    note = os.path.join(stack.run_dir(), "4-judging", "cross-check-gpt.md")
+    with open(note, "a", encoding="utf-8") as fh:
+        fh.write('A note with something that looks like scores: {"builds": {"A": {"correctness": 1}}}\n')
+    with open(note, encoding="utf-8") as fh:
+        kept = fh.read()
+    stack.cli("cross-check")
+    with open(note, encoding="utf-8") as fh:
+        assert fh.read() == kept, "running it again must not lose notes"
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert re.sub(r"Packet hash: \w+", "", report) == re.sub(r"Packet hash: \w+", "", report_before)
+    assert "cross-check" not in report and "(2 of 2)" in stack.cli("status")
+
+
+def test_cross_check_needs_a_packet(make_stack):
+    stack = unattended(make_stack, judges=[{"label": "a", "type": "paste"}, {"label": "b", "type": "paste"}])
+    stack.cli("new-run")
+    assert "Create the judge packet first" in stack.cli("cross-check", expect=1)

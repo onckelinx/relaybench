@@ -147,10 +147,12 @@ the rest of the run carries on.
 | `compare [--task name]` | Compares finished runs per model: tests, judge totals and speed, across runs |
 | `skip ["note"] [--force]` | During `run`: stops the active model, keeps what it built, and moves on |
 | `add-judge` | Adds a judge to a run that has already started, and creates its score file |
+| `cross-check` | Optional: makes a packet for judges to check each other's reports, as notes that are never scored |
 | `start <stage>` | (Re)starts one stage |
 | `load <label>`, `smoke [label]` | Switches to a model by hand; sends it a test message |
 
-`status`, `report`, `judge`, `packet` and `add-judge` also take `--run <id>`, to work on an earlier run.
+`status`, `report`, `judge`, `packet`, `add-judge` and `cross-check` also take `--run <id>`, to work on an
+earlier run.
 
 `freeze --force` and `blind --force` don't delete earlier results: they move whatever depends on them
 to a `_stale-<time>` folder. `judge --force` asks the `api` judges again and replaces their answers.

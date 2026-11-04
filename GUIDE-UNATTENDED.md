@@ -279,6 +279,17 @@ python pipeline.py report
 - **My notes:** add your hardware, power setup and agent version, then run `python pipeline.py report`
   again. It keeps your notes.
 
+**Want a second opinion on the judges?** This is optional. With two or more judges scored:
+
+```bash
+python pipeline.py cross-check
+```
+
+It writes `4-judging/cross-check-packet.md`, with the judges' reports, the hidden test source and the original
+packet. Attach it in a new chat and send `Follow the instructions in this file.` In one real run, this found
+scoring mistakes and bugs the judges had missed. Treat the answers as leads to check, not as facts. They're
+notes, and they never change a score.
+
 Finally, stop the proxy with `Ctrl+C` in its window. In tmux, `tmux kill-session -t relay` closes everything.
 
 ## Next time
