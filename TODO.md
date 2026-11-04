@@ -41,13 +41,8 @@ Cover the plan and review stages, and the case with no agent running.
 Judges are copied into `run.json` when a run starts, and `report` only reads that list. A score file added
 by hand for another judge is **silently ignored**.
 
-Today's way, for a finished run:
-
-1. Add `{"label": "gemini", "type": "paste"}` to `judges` in `runs/<id>/run.json`.
-2. Paste the answer into `4-judging/scores-gemini.md`.
-3. Run `python pipeline.py report`.
-
-Wait until `run` has ended, because a JSON typo would crash a live run.
+Until it exists, use the steps under
+[Explain how to add a forgotten judge](#explain-how-to-add-a-forgotten-judge).
 
 The command:
 
@@ -93,6 +88,60 @@ Extend the table under "Connected over SSH?" in `GUIDE-UNATTENDED.md`:
 `cmd_packet` already creates `scores-<label>.md` for `paste` and `human` judges, and `judge` writes the `api`
 ones. They only appear at the packet step, after all reviews, so `4-judging/` doesn't exist during a long
 run. Say so in step 10 of `GUIDE-UNATTENDED.md`. `add-judge` above covers judges added later.
+
+## Explain how to add a forgotten judge
+
+Add a row to the troubleshooting tables in `GUIDE-UNATTENDED.md` and `GUIDE-MANUAL.md`, for when a judge was
+left out at `init` and the run has already started. It links to a short section with the steps below, which
+add a `paste` judge. Run them from the `relaybench` folder after `run` has ended, changing `claude` to the
+judge's label:
+
+```bash
+cp "runs/$(cat runs/CURRENT)/run.json" "runs/$(cat runs/CURRENT)/run.json.bak"
+python - <<'EOF'
+import json
+path = "runs/" + open("runs/CURRENT").read().strip() + "/run.json"
+with open(path) as fh:
+    run = json.load(fh)
+if not any(j["label"] == "claude" for j in run["judges"]):
+    run["judges"].append({"label": "claude", "type": "paste"})
+    with open(path, "w") as fh:
+        json.dump(run, fh, indent=2)
+print([j["label"] for j in run["judges"]])
+EOF
+touch "runs/$(cat runs/CURRENT)/4-judging/scores-claude.md"
+```
+
+Then paste the judge's complete answer into that file, and run `python pipeline.py report`.
+
+The section should also say:
+
+- Don't use `run`, which starts a new run once this one has a report, or `init`, which doesn't change this
+  run. `packet` isn't needed, because every judge gets the same packet.
+- `pipeline.json` is unchanged, so add the judge there too, or run `init` again, for future runs.
+
+These steps were rehearsed on a mock run, for a `paste` judge only. Check `api` and `human` judges before
+documenting them, and add the rehearsal to `tests/test_e2e.py` so the guides stay true. Replace the section
+with `add-judge` once that exists.
+
+## Copy score files to and from the remote machine
+
+Step 10 of `GUIDE-UNATTENDED.md` shows how to fetch the packet over SSH, but not the score files. You may
+want to edit those on the computer with the browser, so add both directions, run from that computer:
+
+```bash
+# Fetch a score file to edit here
+scp <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/scores-<label>.md .
+
+# Put it back when it's done
+scp scores-<label>.md <you>@<remote-machine>:<path-to-relaybench>/runs/<run-id>/4-judging/
+```
+
+Then run `python pipeline.py report` on the remote machine.
+
+Add a caveat: use the same `<run-id>` both ways, which `cat runs/CURRENT` shows on the remote machine. Build
+letters are shuffled for each run, so a score file put in the wrong run replaces that run's file and its
+scores count for the wrong models.
 
 ## Smaller ideas and open offers
 
