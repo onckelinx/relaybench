@@ -175,7 +175,7 @@ Connect the agent to the proxy, not to the server. In Cline, open **Settings**:
 | **API Key** | anything; the field just can't be empty |
 | **Model ID** | `local-model` |
 | **Context Window Size** | the same as `backend.context_length` in `pipeline.json` |
-| **Max Output Tokens** | one fixed value for every stage, such as `16384`. To enforce it for any agent, see [Pinning model settings](GUIDE-UNATTENDED.md#pinning-model-settings). |
+| **Max Output Tokens** | one fixed value for every stage, such as `32768`. To enforce it for any agent, see [Pinning model settings](GUIDE-UNATTENDED.md#pinning-model-settings). |
 | **Temperature** | leave empty if allowed, so each model uses its own default. Some models loop at temperature 0; check their model cards. |
 
 Exact labels vary by version. Also consider:

@@ -430,7 +430,7 @@ temperature or output limit in our real run, so each model used its own defaults
 every model, add this to the top level of `pipeline.json`:
 
 ```json
-"request_overrides": { "max_tokens": 16384 },
+"request_overrides": { "max_tokens": 32768 },
 ```
 
 The proxy then replaces whatever the agent sends, on every model call, and the report marks those values as
@@ -438,7 +438,8 @@ The proxy then replaces whatever the agent sends, on every model call, and the r
 what it started with. Running `init` again keeps these settings. A proxy started before the code last changed
 may ignore them, so `run` won't start until you've stopped that proxy.
 
-- **`max_tokens`** is the useful one: too low cuts answers off, so choose a generous value.
+- **`max_tokens`** is the useful one: too low cuts answers off, so choose a generous value. In one real run, a
+  model's planning answer reached 22,183 tokens.
 - **`temperature`** is usually better left out, so that each model uses its own default. Some models loop at
   a temperature of 0, so check their model cards before pinning it.
 
