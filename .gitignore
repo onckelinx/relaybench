@@ -9,6 +9,9 @@ results/
 # Archives
 *.zip
 
+# Personal notes and one-off files, never published
+localstuff/
+
 # Python
 __pycache__/
 *.pyc
