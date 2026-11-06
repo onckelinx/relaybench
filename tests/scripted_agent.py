@@ -112,6 +112,14 @@ def main():
     elif mode == "leave-child":
         run_agent(folder, args.base_url, args.model)
         start_child()
+    elif mode in ("tmp-leftover", "tmp-cleaned"):
+        # Like a real model that made a venv in /tmp: one leaves it there, the other removes it before finishing.
+        watched = os.path.join(os.environ["RELAYBENCH_TMP_WATCH"], "venv-" + mode)
+        os.makedirs(watched)
+        time.sleep(2.5)
+        run_agent(folder, args.base_url, args.model)
+        if mode == "tmp-cleaned":
+            os.rmdir(watched)
     else:
         run_agent(folder, args.base_url, args.model)
 

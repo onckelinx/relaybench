@@ -75,8 +75,11 @@ class Stack:
         self.config_path = os.path.join(self.tmp, "pipeline.json")
         self.runs = os.path.join(self.tmp, "runs")
         self.logs = os.path.join(self.tmp, "logs")
+        # Its own folder in place of /tmp, so other programs on this machine can't change what a test sees.
+        watched = os.path.join(self.tmp, "watched-tmp")
+        os.makedirs(watched)
         self.env = dict(os.environ, RELAYBENCH_CONFIG=self.config_path, FAKE_LMS_STATE=self.state,
-                        PYTHONIOENCODING="utf-8")
+                        PYTHONIOENCODING="utf-8", RELAYBENCH_TMP_WATCH=watched)
         self.env.update(env or {})
         self.procs = []
         self.proxy = None
@@ -1131,6 +1134,93 @@ def test_packet_says_how_many_builds_and_partly_scored_judges_are_marked(make_st
     assert "- **claude** (scored 1 of 2) prefers Build A" in report
     assert "- **gpt** prefers Build A" in report
     assert "Some judges didn't score every build, so those builds' averages come from fewer judges." in report
+
+
+@pytest.mark.parametrize("reviewers", [[], [{"label": "mock-reviewer", "model": "mock-reviewer"}]],
+                         ids=["no-reviewers", "reviewers"])
+def test_retry_lets_a_failed_build_join_a_finished_run(make_stack, reviewers):
+    stack = unattended(make_stack, "2-build-1:nothing", reviewers=reviewers, judges=[{"label": "gpt", "type": "paste"}])
+    stack.cli("run", "--allow-sleep")
+    first = stack.run_dir()
+    assert stage_result(stack, "build-mock-good")["status"] == "failed"
+    assert list(stack.json_in_run("blind-key.json")["builds"].values()) == ["mock-buggy"]
+    buggy_before = stack.summary()["mock-buggy"]["passed"]
+    with open(os.path.join(first, "REPORT.md"), "a", encoding="utf-8") as fh:
+        fh.write("- Written by hand: mock-good's first try failed.\n")
+
+    stack.replace_run_agent([sys.executable, AGENT])  # a normal agent, as if the first failure was a one-off
+    out = stack.cli("retry", "build-mock-good")
+    assert "build-mock-good is ready to run again" in out and "new letters" in out
+    assert ("every review runs again" in out) == bool(reviewers)
+    assert not os.path.exists(os.path.join(first, "REPORT.md"))
+    out = stack.cli("run", "--allow-sleep")
+    assert "Resuming run" in out and stack.run_dir() == first, "it must finish the same run, not start a new one"
+
+    assert stage_result(stack, "build-mock-good")["status"] == "done"
+    assert sorted(stack.json_in_run("blind-key.json")["builds"].values()) == ["mock-buggy", "mock-good"]
+    summary = stack.summary()
+    assert summary["mock-good"]["passed"] == HIDDEN_COUNTS["toy-bepay"] and not summary["mock-good"].get("no_build")
+    assert summary["mock-buggy"]["passed"] == buggy_before, "the other build keeps its result"
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert "# Build A" in packet and "# Build B" in packet and "mock-good" not in packet
+    assert "Paste the complete answer from gpt" in stack.text_in_run("4-judging", "scores-gpt.md")
+    if reviewers:
+        assert len([n for n in os.listdir(first) if n.startswith("3-review-")]) == 2
+
+    report = stack.text_in_run("REPORT.md")
+    assert "- Written by hand: mock-good's first try failed." in report, "the report keeps your notes"
+    row = next(line for line in report.splitlines() if line.startswith("| Build") and "(mock-good) | 2 |" in line)
+    calls = int(row.split("|")[3])
+    assert calls == stage_result(stack, "build-mock-good")["model_calls"], "only the last attempt counts: " + row
+    paste_answer(stack, "gpt", 4)
+    stack.cli("report")
+    assert "| gpt |" in stack.text_in_run("REPORT.md")
+    assert "- Written by hand" in stack.text_in_run("REPORT.md")
+    assert len([n for n in os.listdir(first) if n.startswith("_stale-")]) == 1
+
+
+def test_retry_refuses_when_it_would_do_harm(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    assert "Tell me which failed stage" in stack.cli("retry", expect=1)
+    assert "No stage called 'build-nobody'" in stack.cli("retry", "build-nobody", expect=1)
+    assert "isn't marked as failed" in stack.cli("retry", "build-mock-good", expect=1)
+    with open(os.path.join(stack.runs, "run.pid"), "w") as fh:
+        fh.write("%d\n" % os.getpid())  # any live process will do
+    assert "still going" in stack.cli("retry", "build-mock-good", expect=1)
+    assert os.path.exists(os.path.join(stack.run_dir(), "REPORT.md"))
+    assert not [n for n in os.listdir(stack.run_dir()) if n.startswith("_stale")]
+
+
+def test_retry_that_fails_again_changes_nothing_for_the_others(make_stack):
+    stack = unattended(make_stack, "2-build-1:nothing", reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    first = stack.run_dir()
+    stack.cli("retry", "build-mock-good")
+    stack.cli("run", "--allow-sleep")
+    assert stack.run_dir() == first
+    assert stage_result(stack, "build-mock-good")["status"] == "failed"
+    assert list(stack.json_in_run("blind-key.json")["builds"].values()) == ["mock-buggy"]
+    assert os.path.exists(os.path.join(first, "REPORT.md"))
+
+
+def test_files_left_in_tmp_are_flagged_and_kept(make_stack):
+    stack = unattended(make_stack, "2-build-1:tmp-leftover", "2-build-2:tmp-cleaned", reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    watched = stack.env["RELAYBENCH_TMP_WATCH"]
+    assert "new in /tmp during this stage, maybe from another program: venv-tmp-leftover" in \
+        stage_result(stack, "build-mock-good")["flags"]
+    assert "new in /tmp during this stage, maybe from another program: venv-tmp-cleaned (removed again)" in \
+        stage_result(stack, "build-mock-buggy")["flags"], "something removed before the end still counts"
+    assert not any("/tmp" in flag for flag in stage_result(stack, "plan")["flags"])
+    assert os.listdir(watched) == ["venv-tmp-leftover"], "nothing is deleted"
+    assert "venv-tmp-cleaned (removed again)" in stack.text_in_run("REPORT.md")
+
+    module = load_pipeline_module()
+    names = ["a|b", "c;d", "e", "f", "g", "h", "i"]
+    flag = module._tmp_flag({"tmp_new": names, "tmp_kept": names})
+    assert flag == "new in /tmp during this stage, maybe from another program: a/b, c,d, e, f, g and 2 more"
+    assert module._tmp_flag({"tmp_new": [], "tmp_kept": []}) is None
 
 
 def datetime_of(text):

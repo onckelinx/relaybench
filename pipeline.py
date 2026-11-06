@@ -91,6 +91,7 @@ Commands (run them from the repository folder):
   {cmd} run              Do all of the above unattended, with a command-line agent
   {cmd} compare          Compare finished runs, per model
   {cmd} skip ["note"]    During run: stop the active model, keep what it built, and move on
+  {cmd} retry <stage>    Run a failed stage again, e.g. build-<label>, even after the report
   {cmd} add-judge        Add a judge to a run that has already started
   {cmd} cross-check      Optional: a packet for judges to check each other's reports, as notes only
 
@@ -2642,8 +2643,12 @@ def cmd_report(cfg, _args):
     report = os.path.join(path, "REPORT.md")
     notes = ("- Hardware and power settings:\n- Agent, version and its settings:\n"
              "- What broke or was confusing:\n- What surprised me:\n- What to change for the next run:\n")
-    if os.path.exists(report):
-        with open(report, encoding="utf-8", errors="replace") as fh:
+    # After a retry or a --force redo, the old report is in a _stale folder: its notes still belong to this run.
+    earlier = [report] if os.path.exists(report) else sorted(
+        (p for p in (os.path.join(path, n, "REPORT.md") for n in os.listdir(path) if n.startswith("_stale"))
+         if os.path.exists(p)), key=os.path.getmtime, reverse=True)
+    if earlier:
+        with open(earlier[0], encoding="utf-8", errors="replace") as fh:
             previous = fh.read()
         marker = "\n## My notes\n"
         if marker in previous:
@@ -2934,6 +2939,27 @@ def _read_skip_request(skip_path):
     return request if isinstance(request, dict) else {}
 
 
+def cmd_retry(cfg, args):
+    """Give a failed stage another go, even in a run that already has its report."""
+    run_pid = _read_pid(os.path.join(runs_root(cfg), "run.pid"))
+    if run_pid and _pid_alive(run_pid):
+        die("A run is still going. Wait for it to finish. Nothing was changed.")
+    run_id, path, run = current_run(cfg)
+    names = [stage[0] for stage in model_stages(path, run)]
+    if args.label not in names:
+        die("No stage called '%s' in this run.\nStages: %s" % (args.label, ", ".join(names)))
+    if (_read_stage_results(path).get(args.label) or {}).get("status") != "failed":
+        die("%s isn't marked as failed, so there's nothing to retry. Nothing was changed." % args.label)
+    # Everything made from the set of builds: the anonymisation, tests, reviews, the packet and scores, the report.
+    reviews = sorted(n for n in os.listdir(path) if n.startswith("3-review-"))
+    stale = move_to_stale(path, ["tests", "blind-key.json", "4-judging", "REPORT.md"] + reviews)
+    _forget_stage_results(path, lambda name: name == args.label)
+    ok("%s is ready to run again in %s. Start it with:  %s run" % (args.label, run_id, CMD))
+    if stale:
+        warn("The builds get new letters, so any judges' answers from before need redoing%s. The old files are "
+             "in %s, and the report keeps your notes." % (", and every review runs again" if reviews else "", stale))
+
+
 def cmd_skip(cfg, args):
     root = runs_root(cfg)
     run_pid = _read_pid(os.path.join(root, "run.pid"))
@@ -2975,7 +3001,9 @@ def _run_agent(cfg, agent, path, name, folder):
     skip_path = os.path.join(runs_root(cfg), SKIP_REQUEST)
     _remove_file(skip_path)  # anything still there was meant for a stage that has ended
     kwargs = {"start_new_session": True} if os.name != "nt" else {}
-    outcome = {"exit_code": None, "stopped": None, "error": None, "seconds": 0, "slept_s": 0}
+    outcome = {"exit_code": None, "stopped": None, "error": None, "seconds": 0, "slept_s": 0, "tmp_new": []}
+    tmp_before = _tmp_entries()
+    tmp_seen = set()
     started = time.monotonic()
     with open(os.path.join(log_dir, name + ".log"), "ab") as out:
         try:
@@ -2994,6 +3022,8 @@ def _run_agent(cfg, agent, path, name, folder):
                 # A call in flight counts as activity: local models can think for minutes before the first token.
                 clock.tick(time.time(), time.monotonic(), seq != last_seq or in_flight > 0)
                 last_seq = seq
+                # On every poll, so something the agent made and then removed again still shows up.
+                tmp_seen |= _tmp_entries() - tmp_before
                 request = _read_skip_request(skip_path)
                 if request is not None:
                     _remove_file(skip_path)
@@ -3014,7 +3044,30 @@ def _run_agent(cfg, agent, path, name, folder):
             _remove_file(pid_path)
     outcome["seconds"] = clock.awake
     outcome["slept_s"] = clock.slept
+    still_there = _tmp_entries()
+    outcome["tmp_new"] = sorted((tmp_seen | (still_there - tmp_before)), key=lambda n: (n not in still_there, n))
+    outcome["tmp_kept"] = sorted(still_there - tmp_before)
     return outcome
+
+
+def _tmp_entries():
+    """Top-level names in /tmp. Builders are told to stay in their folder, but in a real run one made a venv there."""
+    try:
+        return set(os.listdir(os.environ.get("RELAYBENCH_TMP_WATCH", "/tmp")))
+    except OSError:
+        return set()
+
+
+def _tmp_flag(outcome):
+    """A note for the report about /tmp, or None. It lists names only, and deletes nothing."""
+    new = outcome.get("tmp_new") or []
+    if not new:
+        return None
+    kept = set(outcome.get("tmp_kept") or [])
+    shown = ["%s%s" % (n, "" if n in kept else " (removed again)") for n in new[:5]]
+    more = " and %d more" % (len(new) - 5) if len(new) > 5 else ""
+    text = "new in /tmp during this stage, maybe from another program: %s%s" % (", ".join(shown), more)
+    return text.replace("|", "/").replace(";", ",")
 
 
 def _uncommitted_work(folder):
@@ -3055,6 +3108,8 @@ def _settle_stage(cfg, run_id, name, folder, kind, outcome, since):
         result["flags"].append("agent exited with code %s" % outcome["exit_code"])
     if outcome["slept_s"]:
         result["flags"].append("machine slept for %.0f min, so wall time is unreliable" % (outcome["slept_s"] / 60))
+    if _tmp_flag(outcome):
+        result["flags"].append(_tmp_flag(outcome))
 
     output = {"plan": "plan.md", "review": "REVIEW.md"}.get(kind)
     output_path = os.path.join(folder, output) if output else None
@@ -3317,7 +3372,7 @@ def main():
         "start": cmd_start, "status": cmd_status, "load": cmd_load, "smoke": cmd_smoke,
         "freeze": cmd_freeze, "test": cmd_test, "blind": cmd_blind, "packet": cmd_packet,
         "judge": cmd_judge, "report": cmd_report, "run": cmd_run, "compare": cmd_compare,
-        "skip": cmd_skip, "add-judge": cmd_add_judge, "cross-check": cmd_cross_check,
+        "skip": cmd_skip, "add-judge": cmd_add_judge, "cross-check": cmd_cross_check, "retry": cmd_retry,
     }
     if args.command == "init":
         try:
@@ -3334,6 +3389,8 @@ def main():
         die("Tell me which model to load, e.g.:  %s load <label>" % CMD)
     if args.command == "start" and not args.label:
         die("Tell me which stage to start, e.g.:  %s start plan" % CMD)
+    if args.command == "retry" and not args.label:
+        die("Tell me which failed stage to run again, e.g.:  %s retry build-<label>" % CMD)
     if args.run_id:
         if args.command not in RUN_OPTION_COMMANDS:
             die("--run only works with: %s." % ", ".join(RUN_OPTION_COMMANDS))
