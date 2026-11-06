@@ -202,6 +202,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(404, {"error": {"message": "unknown model: %s" % model}})
         content = answer_for(req.get("messages") or [], model)
         usage = {"prompt_tokens": max(length // 4, 1), "completion_tokens": max(len(content) // 4, 1)}
+        if "cached" in model:
+            usage["prompt_tokens_details"] = {"cached_tokens": max(length // 8, 1)}
         if not req.get("stream"):
             return self._json(200, {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": usage})
 

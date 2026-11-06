@@ -968,6 +968,124 @@ def test_usage_estimates_and_reasoning_are_marked(make_stack):
     assert "`~` = the server sent no token counts" in report
 
 
+def test_proxy_logs_request_size_and_cached_tokens(make_stack):
+    stack = make_stack(["mock-planner", "mock-cached", "mock-buggy", "mock-reviewer"])
+    stack.write_config(builders=[{"label": "mock-x", "model": "mock-cached"},
+                                 {"label": "mock-buggy", "model": "mock-buggy"}])
+    stack.start_proxy()
+    stack.through_tests()
+    cached = [r for r in stack.proxy_log() if r["stage"] == "build-mock-x"]
+    plain = [r for r in stack.proxy_log() if r["stage"] == "build-mock-buggy"]
+    assert cached and plain
+    for record in cached + plain:
+        assert record["request_bytes"] > 0 and record["messages"] >= 1, record
+    assert all(r["cached_tokens"] and r["cached_tokens"] < r["input_tokens"] for r in cached)
+    assert all(r["cached_tokens"] is None for r in plain), "a server that doesn't say must log nothing"
+
+    # Without streaming too, and the size is what the agent sent, before the proxy changed anything.
+    body = json.dumps({"model": "mock-cached", "messages": [{"role": "user", "content": "Reply with exactly these two "
+                                                                           "words: pipeline OK"}]}).encode()
+    request = urllib.request.Request("http://127.0.0.1:%d/run/size/test/v1/chat/completions" % stack.proxy_port,
+                                     data=body, headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(request, timeout=30).read()
+    record = [r for r in stack.proxy_log() if r["run_id"] == "size"][-1]
+    assert record["request_bytes"] == len(body) and record["messages"] == 1 and record["cached_tokens"]
+
+
+def _calls(inputs=None, outputs=None, waits=None):
+    count = len(inputs or outputs)
+    inputs = inputs or [5000] * count
+    outputs = outputs or [300 + 7 * i for i in range(count)]
+    waits = waits or [1.0] * count
+    return [{"epoch": 1000.0 + 20 * i, "input_tokens": inputs[i], "output_tokens": outputs[i], "ttft_s": waits[i],
+             "total_s": 10.0} for i in range(count)]
+
+
+def test_cut_prompts_and_loops_are_spotted():
+    """Shaped like the real cases: a prompt cut to a fixed size near the limit, and models repeating themselves."""
+    module = load_pipeline_module()
+    growing = list(range(8000, 64000, 2000))
+    cut = _calls(growing + [31241] * 30, waits=[3.0] * 28 + [35.0] * 30)
+    drop = module._context_drop(cut, 65536)
+    assert drop == {"call": 29, "from": 62000, "to": 31241, "calls": 30, "wait_s": 1050.0, "usual_wait_s": 3.0,
+                    "near_limit": True}
+    assert module._context_drop(cut, None)["near_limit"] is False, "an unknown limit isn't called the limit"
+    # An agent summarising its history makes input fall too, but it grows again afterwards.
+    assert module._context_drop(_calls(growing + [20000, 21000, 22000, 23000]), 65536) is None
+    assert module._context_drop(_calls(growing + [31241, 31241, 33000]), 65536) is None, "two calls are not enough"
+    assert module._context_drop(_calls(growing), 65536) is None
+
+    varied = list(range(300, 300 + 45 * 7, 7))
+    loop = module._answer_loop(_calls(outputs=varied + [147, 561] * 33))
+    assert (loop["period"], loop["sizes"], loop["from_call"], loop["to_call"], loop["times"]) == \
+        (2, [147, 561], 46, 111, 33)
+    loop = module._answer_loop(_calls(outputs=varied[:37] + [78, 271, 296, 781, 717] * 14))
+    assert (loop["period"], loop["from_call"], loop["times"]) == (5, 38, 14)
+    # Equal answers a few times in a row happen in normal work, and a normal build has no cycle at all.
+    assert module._answer_loop(_calls(outputs=varied[:10] + [200] * 3 + varied[10:20])) is None
+    assert module._answer_loop(_calls(outputs=varied)) is None
+
+    notes = module._proxy_notes(cut, 65536)
+    assert len(notes) == 1 and notes[0].startswith("context limit: at call 29, input fell from 62,000 to 31,241 tokens "
+                                                   "(limit 65,536) and stayed at exactly that for 30 calls")
+    assert "17.5 min in total" in notes[0] and "median before: 3.0 s" in notes[0]
+    looping = _calls(outputs=varied + [147, 561] * 33)
+    assert module._proxy_notes(looping, None, started=1000.0 - 60) == [
+        "repeating itself: from call 46 (minute 16.0) to call 111, a 2-call cycle of 147 and 561 output tokens "
+        "repeated 33 times"]
+    assert module._proxy_notes(_calls(outputs=varied)) == []
+
+
+def test_report_warns_from_the_proxy_log_and_counts_the_last_attempt(make_stack):
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    run_id = os.path.basename(stack.run_dir())
+    history = os.path.join(stack.run_dir(), "stage-history.jsonl")
+    with open(history, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh]
+    start = datetime_of(next(r["at"] for r in rows if r["stage"] == "build-mock-good"))
+    real = [r for r in stack.proxy_log() if r["stage"] == "build-mock-good"]
+    before = len([r for r in stack.proxy_log() if r["stage"] == "build-mock-buggy"])
+
+    # An earlier try of mock-good, two hours before: a stalled call, which must not count in its row.
+    with open(history, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"stage": "build-mock-good", "at": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                                                              time.localtime(start - 7200))}) + "\n")
+    stalled = dict(real[0], epoch=start - 7190, total_s=366.0, ttft_s=5.0, output_tokens=12, input_tokens=None)
+    # mock-buggy's build then looping and cut, as in the real runs.
+    varied = list(range(300, 300 + 45 * 7, 7))
+    extra = [dict(rec, run_id=run_id, stage="build-mock-buggy", epoch=time.time() + 20 * i)
+             for i, rec in enumerate(_calls(inputs=list(range(8000, 98000, 2000)) + [31241] * 66,
+                                            outputs=varied + [147, 561] * 33))]
+    with open(os.path.join(stack.logs, "proxy-log.jsonl"), "a", encoding="utf-8") as fh:
+        for rec in [stalled] + extra:
+            fh.write(json.dumps(rec) + "\n")
+
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    row = next(line for line in report.splitlines() if line.startswith("| Build") and "(mock-good)" in line)
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    assert cells[1] == "2" and cells[2] == str(len(real)), row
+    assert float(cells[-1].split()[0]) < 5, "wall time must not reach back to the earlier try: " + row
+    assert "counts only the calls from its last one" in report
+    assert "**Warnings from the proxy log:**" in report
+    assert re.search(r"- Build \w \(mock-buggy\): prompt cut: at call \d+, input fell from [\d,]+ to 31,241 tokens and "
+                     r"stayed at exactly that for 66 calls", report), report
+    assert re.search(r"- Build \w \(mock-buggy\): repeating itself: from call %d \(minute [\d.]+\) to call %d, a 2-call "
+                     r"cycle of 147 and 561 output tokens repeated 33 times" % (before + 46, before + 111), report), report
+    assert "(mock-good): repeating" not in report and "(mock-good): prompt cut" not in report
+
+    # compare's speed leaves out the earlier try too.
+    module = load_pipeline_module()
+    expected = module._generation_speed(real)
+    out = stack.cli("compare")
+    assert re.search(r"\| mock-good \| 1 \| 0 \| 0 \| [^|]+ \| 0 \| – \| %s tok/s \|" % re.escape(module._f(expected)), out), out
+
+
+def datetime_of(text):
+    return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%S"))
+
+
 def test_aborted_stream_still_logs_stats(make_stack):
     stack = make_stack(["mock-planner", "mock-slow", "mock-good", "mock-reviewer"])
     stack.write_config()
@@ -1435,10 +1553,15 @@ def test_repeat_then_compare(make_stack):
     for field in ("task", "prompts", "scoring"):
         changes(lambda run: run["hashes"].update({field: "something-else"}))
     changes(lambda run: run["agent"].update({"command": ["another-agent"]}))
+    # A different server or context length changes speed, and maybe what the model sees.
+    changes(lambda run: run["backend"].update({"type": "lmstudio"}))
+    changes(lambda run: run.update({"context_controlled": True}) or run["backend"].update({"context_length": 4096}))
     run = json.loads(original)
+    assert "Server: `openai-compatible` · Context: set by the server" in out
 
     # A run from an older version, without what newer runs record, still loads.
-    for name in ("machine", "hashes", "agent", "model_details", "test_timeout_s", "request_overrides", "agent_version"):
+    for name in ("machine", "hashes", "agent", "model_details", "test_timeout_s", "request_overrides", "agent_version",
+                 "backend", "context_controlled"):
         run.pop(name, None)
     with open(first, "w", encoding="utf-8") as fh:
         json.dump(run, fh)
@@ -2049,6 +2172,13 @@ def test_failing_areas_and_the_task_hash(make_stack, tmp_path):
     # Without the file there's no column, and bad groups never break a report.
     assert module._read_test_groups(str(folder)) == {}
     assert module._failing_areas({"x": ["a"]}, ["bab", "cdc", "aaa"]) == "x (2), other (1)"
+    # One slow search fails these too, so they count where it shows up rather than as two more areas.
+    cron = module._read_test_groups(os.path.join(ROOT, "tasks", "cron-next"))
+    slow = ["test_hidden.test_impossible_date_returns_none[0 0 31 2 *]", "test_hidden.test_next_n_never_fires",
+            "test_hidden.test_cli_no_match"]
+    assert module._failing_areas(cron, slow) == "schedules that end (3)"
+    assert module._failing_areas(cron, ["test_hidden.test_next_n_runs_out", "test_hidden.test_cli_prints_iso"]) == \
+        "next_n (1), command line (1)"
     assert module._read_test_groups(str(tmp_path)) is None
 
 

@@ -35,6 +35,8 @@
   ],
   "schedules that end": [
     "test_impossible_date",
+    "test_next_n_never_fires",
+    "test_cli_no_match",
     "test_end_of_time",
     "test_last_representable"
   ],

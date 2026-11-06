@@ -2254,6 +2254,104 @@ def _packet_hash(path):
         return None
 
 
+def _stage_starts(path):
+    """When each stage was started, oldest first, from stage-history.jsonl. A restart adds another entry."""
+    starts = {}
+    try:
+        with open(os.path.join(path, "stage-history.jsonl"), encoding="utf-8") as fh:
+            rows = fh.readlines()
+    except OSError:
+        return starts
+    for row in rows:
+        try:
+            entry = json.loads(row)
+        except ValueError:
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(entry.get("at") or "").timestamp()
+        except (TypeError, ValueError):
+            at = None
+        starts.setdefault(entry.get("stage"), []).append(at)
+    return starts
+
+
+def _last_attempt(recs, starts):
+    """Only the calls since a stage's last start, so a failed earlier try doesn't count in its speed or times."""
+    times = [t for t in starts or [] if t is not None]
+    if len(starts or []) < 2 or not times:
+        return recs
+    cut = max(times) - 1  # the history is to the second
+    return [r for r in recs if (r.get("epoch") or 0) >= cut] or recs
+
+
+def _context_drop(recs, context=None):
+    """A prompt cut to a fixed size: input falls sharply, then stays at exactly one count for 3 calls or more.
+
+    In a real run this happened near LM Studio's context limit. Every later call then reprocessed the whole
+    prompt, so each one waited about half a minute for its first token. None if it didn't happen."""
+    sizes = [r.get("input_tokens") for r in recs]
+    for i in range(1, len(recs)):
+        before, after = sizes[i - 1], sizes[i]
+        if not before or not after or after >= before * 0.7:
+            continue
+        end = i
+        while end + 1 < len(recs) and sizes[end + 1] == after:
+            end += 1
+        if end - i + 1 < 3:
+            continue
+        waits = [r.get("ttft_s") for r in recs[i:end + 1] if r.get("ttft_s") is not None]
+        return {"call": i + 1, "from": before, "to": after, "calls": end - i + 1, "wait_s": sum(waits),
+                "usual_wait_s": _median([r.get("ttft_s") for r in recs[:i]]),
+                "near_limit": bool(context and before >= 0.9 * context)}
+    return None
+
+
+def _answer_loop(recs, min_repeats=4, min_calls=8):
+    """The longest stretch where answer sizes repeat in a cycle of 1 to 6 calls, or None.
+
+    A model stuck in a loop gives the same answers again and again, so their token counts repeat exactly."""
+    calls = [(number, r) for number, r in enumerate(recs, 1) if r.get("output_tokens") and not r.get("aborted")]
+    sizes = [r["output_tokens"] for _, r in calls]
+    best = None
+    for period in range(1, 7):
+        start = 0
+        while start + period < len(sizes):
+            end = start
+            while end + period < len(sizes) and sizes[end] == sizes[end + period]:
+                end += 1
+            length = end - start + period
+            if end > start and length >= min_calls and length / period >= min_repeats and \
+                    (best is None or length > best["length"]):
+                best = {"length": length, "period": period, "times": length // period, "sizes": sizes[start:start + period],
+                        "from_call": calls[start][0], "to_call": calls[end + period - 1][0],
+                        "epoch": calls[start][1].get("epoch")}
+            start = max(end, start + 1)
+    return best
+
+
+def _proxy_notes(recs, context=None, started=None):
+    """Problems only the proxy log shows: a prompt cut to a fixed size, and a model repeating itself."""
+    notes = []
+    drop = _context_drop(recs, context)
+    if drop:
+        notes.append("%s: at call %d, input fell from %s to %s tokens%s and stayed at exactly that for %d calls, "
+                     "which waited %s min in total for a first token (median before: %s s)" % (
+                         "context limit" if drop["near_limit"] else "prompt cut", drop["call"],
+                         "{:,}".format(drop["from"]), "{:,}".format(drop["to"]),
+                         " (limit {:,})".format(context) if drop["near_limit"] else "", drop["calls"],
+                         _f(drop["wait_s"] / 60), _f(drop["usual_wait_s"])))
+    loop = _answer_loop(recs)
+    if loop:
+        first = started if started is not None else (recs[0].get("epoch") if recs else None)
+        minute = " (minute %s)" % _f((loop["epoch"] - first) / 60) if first and loop.get("epoch") else ""
+        sizes = ["{:,}".format(s) for s in loop["sizes"]]
+        cycle = "answers of %s output tokens" % sizes[0] if loop["period"] == 1 else \
+            "a %d-call cycle of %s and %s output tokens" % (loop["period"], ", ".join(sizes[:-1]), sizes[-1])
+        notes.append("repeating itself: from call %d%s to call %d, %s repeated %d times" % (
+            loop["from_call"], minute, loop["to_call"], cycle, loop["times"]))
+    return notes
+
+
 def cmd_report(cfg, _args):
     run_id, path, run = current_run(cfg)
     key = read_blind_key(path) or {"builds": {}, "reviewers": {}}
@@ -2283,16 +2381,16 @@ def cmd_report(cfg, _args):
             by_stage[rec["stage"]] = []
         by_stage[rec["stage"]].append(rec)
 
-    attempts = {}
-    history = os.path.join(path, "stage-history.jsonl")
-    if os.path.exists(history):
-        with open(history, encoding="utf-8") as fh:
-            for row in fh:
-                try:
-                    name = json.loads(row).get("stage")
-                except ValueError:
-                    continue
-                attempts[name] = attempts.get(name, 0) + 1
+    starts = _stage_starts(path)
+    attempts = {stage: len(times) for stage, times in starts.items()}
+    # The speed table counts each stage's last attempt only. Settings and integrity flags keep every call.
+    recent = {stage: _last_attempt(by_stage[stage], starts.get(stage)) for stage in order}
+    context_limit = run.get("backend", {}).get("context_length") if run.get("context_controlled") else None
+    proxy_notes = []
+    for stage in order:
+        times = [t for t in starts.get(stage) or [] if t is not None]
+        for note in _proxy_notes(recent[stage], context_limit, max(times) if times else None):
+            proxy_notes.append((stage, note))
 
     machine = run.get("machine") or {}
     hardware = [machine.get("cpu"), "%s GB" % machine["memory_gb"] if machine.get("memory_gb") else None]
@@ -2332,7 +2430,7 @@ def cmd_report(cfg, _args):
                   "|---|---|---|---|---|---|---|---|---|---|"]
         total = {"calls": 0, "errors": 0, "input": 0, "output": 0, "model": 0, "wall": 0}
         for stage in order:
-            recs = by_stage[stage]
+            recs = recent[stage]
             errors = sum(1 for r in recs if (r.get("status") or 0) >= 400)
             inp = sum(r.get("input_tokens") or 0 for r in recs)
             out = sum(r.get("output_tokens") or 0 for r in recs)
@@ -2357,9 +2455,14 @@ def cmd_report(cfg, _args):
         lines += ["", "*Model time* = time spent waiting for the model. "
                       "*Wall time* = first to last model call in that stage (includes %s). "
                       "*Total* adds up the stages, so it leaves out the harness's own work between them." % included]
+        if any(attempts.get(stage, 0) > 1 for stage in order):
+            lines += ["", "With more than one attempt, a stage's row counts only the calls from its last one."]
         if any_estimate:
             lines += ["", "`~` = the server sent no token counts for some calls, so those are counted in stream "
                           "chunks. Speeds for such stages are estimates; don't compare them across servers."]
+        if proxy_notes:
+            lines += ["", "**Warnings from the proxy log:**", ""]
+            lines += ["- %s: %s." % (stage_name(stage), note) for stage, note in proxy_notes]
         lines += ["", "## Settings sent to the model", "",
                   "| Stage | Temperature | Max tokens |", "|---|---|---|"]
 
@@ -2556,15 +2659,20 @@ def cmd_compare(cfg, args):
     for rec in _read_log(cfg):
         log.setdefault((rec.get("run_id"), rec.get("stage")), []).append(rec)
 
-    # Different tests, prompts, scoring, agent or pinned settings mean different results, so these never share a table.
+    # Different tests, prompts, scoring, agent, pinned settings, server or context length mean different results,
+    # so these never share a table.
     groups = {}
     for name, path, run in runs:
         hashes = run.get("hashes") or {}
         agent = (run.get("agent") or {}).get("command")
         mode = shlex.join(agent) if agent and _read_stage_results(path) else "manual"
         pinned = json.dumps(run.get("request_overrides") or {}, sort_keys=True)
-        group = groups.setdefault((run.get("task"), hashes.get("task"), hashes.get("prompts"),
-                                   hashes.get("scoring"), mode, pinned), {"runs": 0, "models": {}, "judges": set()})
+        backend = run.get("backend") or {}
+        server = backend.get("type", "lmstudio")
+        context = backend.get("context_length") if run.get("context_controlled", "context_length" in backend) else None
+        group = groups.setdefault((run.get("task"), hashes.get("task"), hashes.get("prompts"), hashes.get("scoring"),
+                                   mode, pinned, server, context), {"runs": 0, "models": {}, "judges": set()})
+        starts = _stage_starts(path)
         group["runs"] += 1
         group["judges"].add(tuple(sorted(j.get("label", "") for j in run.get("judges", []))))
         key = read_blind_key(path) or {"builds": {}}
@@ -2585,19 +2693,22 @@ def cmd_compare(cfg, args):
             total = _judge_total(path, run, key, letter_of[label]) if label in letter_of else None
             if total is not None:
                 model["judged"].append(total)
-            speed = _generation_speed(log.get((run.get("run_id", name), "build-" + label), []))
+            speed = _generation_speed(_last_attempt(log.get((run.get("run_id", name), "build-" + label), []),
+                                                    starts.get("build-" + label)))
             if speed is not None:
                 model["speed"].append(speed)
 
     lines = ["# Comparing %d finished run(s)" % len(runs), ""]
     if len(groups) > 1:
-        lines += ["These runs differ in their task, prompts, scoring, agent or pinned settings, "
-                  "so they are not averaged together.", ""]
-    for (task, task_hash, prompts, scoring, mode, pinned), group in groups.items():
+        lines += ["These runs differ in their task, prompts, scoring, agent, pinned settings, server or context "
+                  "length, so they are not averaged together.", ""]
+    for (task, task_hash, prompts, scoring, mode, pinned, server, context), group in groups.items():
         lines += ["## `%s`: %d run(s)" % (task, group["runs"]), "",
                   "Mode: `%s` · Task hash: %s · Prompts hash: %s · Scoring hash: %s · Pinned: %s" % (
                       mode, task_hash or "–", prompts or "–", scoring or "–",
                       "–" if pinned == "{}" else "`%s`" % pinned), "",
+                  "Server: `%s` · Context: %s" % (
+                      server, "{:,} tokens".format(context) if isinstance(context, int) else "set by the server"), "",
                   "| Model | Runs | Failed builds | Stopped | Hidden tests passed | Judged runs | Judge total, of 25 | Generation speed |",
                   "|---|---|---|---|---|---|---|---|"]
         for label, model in sorted(group["models"].items()):

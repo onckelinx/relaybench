@@ -7,6 +7,9 @@ the model server. For each model call the proxy records:
   run id, stage, model, input tokens, output tokens,
   time to first token, generation speed (tokens/sec), total time,
   the sampling settings the agent sent, and integrity hits (see below).
+  It also records the size of each request as the agent sent it (bytes and number of
+  messages), and cached prompt tokens when the server reports them. Comparing the
+  request size with the server's input tokens shows who shortened a long prompt.
 
 Which run and stage a call belongs to is read from <logs_dir>/current-stage.json,
 which `pipeline.py next` / `start` / `load` write. A request path that starts
@@ -154,6 +157,7 @@ class StreamStats:
         self.first_token_at = None
         self.input_tokens = None
         self.output_tokens = None
+        self.cached_tokens = None
         self.delta_count = 0
 
     def feed_line(self, line, now):
@@ -188,6 +192,11 @@ class StreamStats:
                 self._take_usage(event["usage"])
 
     def _take_usage(self, usage):
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and details.get("cached_tokens") is not None:
+            self.cached_tokens = details["cached_tokens"]
+        elif usage.get("cache_read_input_tokens") is not None:
+            self.cached_tokens = usage["cache_read_input_tokens"]
         inp = usage.get("input_tokens", usage.get("prompt_tokens"))
         if inp:
             cached = (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
@@ -200,6 +209,7 @@ class StreamStats:
 def apply_stream_stats(record, stats, started, ended):
     """Also runs for aborted streams: a cancelled, looping model is a finding too."""
     record["input_tokens"] = stats.input_tokens
+    record["cached_tokens"] = stats.cached_tokens
     if stats.output_tokens:
         record["output_tokens"] = stats.output_tokens
         record["usage_source"] = "server"
@@ -279,6 +289,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
+        request_bytes, messages = len(body), None
 
         if model_id and self.command == "GET" and MODELS_LIST_RE.match(rest):
             self._send_simple(200, {"object": "list", "data": [
@@ -298,6 +309,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if body:
             try:
                 req = json.loads(body)
+                listed = req.get("messages", req.get("input"))
+                messages = len(listed) if isinstance(listed, list) else None
                 model = req.get("model")
                 wants_stream = bool(req.get("stream"))
                 temperature = req.get("temperature")
@@ -347,7 +360,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "max_tokens": max_tokens,
             "pinned": pinned,
             "status": None,
+            "request_bytes": request_bytes,
+            "messages": messages,
             "input_tokens": None,
+            "cached_tokens": None,
             "output_tokens": None,
             "usage_source": None,
             "ttft_s": None,
@@ -411,6 +427,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         usage_stats = StreamStats()
                         usage_stats._take_usage(usage)
                         record["input_tokens"] = usage_stats.input_tokens
+                        record["cached_tokens"] = usage_stats.cached_tokens
                         record["output_tokens"] = usage_stats.output_tokens
                         if usage_stats.output_tokens:
                             record["usage_source"] = "server"
