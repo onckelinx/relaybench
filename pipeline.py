@@ -39,6 +39,8 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Above this, warn that a chat may read only part of the judge packet. Two chats stopped near 90,000 in a real run.
+LONG_PACKET_CHARS = 80000
 CONFIG_PATH = os.environ.get("RELAYBENCH_CONFIG") or os.path.join(HERE, "pipeline.json")
 PLACEHOLDER = "PASTE-MODEL-KEY-HERE"
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -1830,6 +1832,15 @@ def _judge_instructions(path, judge):
     return ["%s: fill in %s" % (judge["label"], score_file)]
 
 
+def _packet_intro(letters):
+    if len(letters) == 1:
+        which = "1 build: %s" % letters[0]
+    else:
+        which = "%d builds: %s %s %s" % (len(letters), letters[0], "and" if len(letters) == 2 else "to", letters[-1])
+    return ("This packet holds %s. If you can't read all of it, say which builds you couldn't read, "
+            "and score only the ones you could." % which)
+
+
 def cmd_packet(cfg, _args):
     run_id, path, run = current_run(cfg)
     key = read_blind_key(path)
@@ -1855,7 +1866,9 @@ def cmd_packet(cfg, _args):
 
     source = task_dir(cfg, run["task"])
     starter = os.path.join(source, "starter")
-    parts = ["# Judge packet", "", read(os.path.join(HERE, "prompts", "judge.md")), "",
+    # First, because some chats read only the start of a long attachment. Not in prompts/, so no hash changes.
+    parts = ["# Judge packet", "", _packet_intro(sorted_letters(key["builds"])), "",
+             read(os.path.join(HERE, "prompts", "judge.md")), "",
              "---", "", read(os.path.join(HERE, "scoring", "scoresheet.md")), "",
              "---", "", "# The task", "", read(os.path.join(path, "1-plan", "TASK.md")), ""]
     if os.path.isdir(starter):
@@ -1911,8 +1924,9 @@ def cmd_packet(cfg, _args):
     judge_dir = os.path.join(path, "4-judging")
     os.makedirs(judge_dir, exist_ok=True)
     packet = os.path.join(judge_dir, "judge-packet.md")
+    text = "\n".join(parts) + "\n"
     with open(packet, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(parts) + "\n")
+        fh.write(text)
     for judge in run.get("judges", []):
         _create_score_file(path, judge, key)
 
@@ -1923,7 +1937,10 @@ def cmd_packet(cfg, _args):
              "because this can un-blind the judges." % ", ".join("Build " + x for x in leaks))
     if not SELECTED_RUN:  # an older run must not take over the proxy's labelling from a run in progress
         set_stage(cfg, run_id, "judging", None)
-    say("\nJudge packet created: %s" % packet)
+    say("\nJudge packet created: %s (%s characters)" % (packet, "{:,}".format(len(text))))
+    if len(text) > LONG_PACKET_CHARS:
+        warn("This packet is long. In one real run, two chats read only about its first 90,000 characters. "
+             "Check that each judge's answer scores every build.")
     lines = []
     for judge in run.get("judges", []):
         lines += _judge_instructions(path, judge)
@@ -2254,6 +2271,24 @@ def _packet_hash(path):
         return None
 
 
+def _required_plan_sections():
+    """The sections prompts/plan.md asks the planner for, in its own words: its numbered, bold list items."""
+    try:
+        with open(os.path.join(HERE, "prompts", "plan.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    return re.findall(r"^\d+\.\s+\*\*(.+?)\*\*", text, flags=re.MULTILINE)
+
+
+def _missing_plan_sections(plan_text, required=None):
+    """Required sections that no heading or bold line in the plan names."""
+    titles = [match.group(2).lower() for match in
+              re.finditer(r"^\s*(#+\s*|\d+\.\s*\*\*|\*\*)(.+)$", plan_text or "", flags=re.MULTILINE)]
+    return [s for s in (_required_plan_sections() if required is None else required)
+            if not any(s.lower() in title for title in titles)]
+
+
 def _stage_starts(path):
     """When each stage was started, oldest first, from stage-history.jsonl. A restart adds another entry."""
     starts = {}
@@ -2419,8 +2454,16 @@ def cmd_report(cfg, _args):
                  run["planner"]["label"],
                  ", ".join(b["label"] for b in run["builders"]),
                  ", ".join(r["label"] for r in run["reviewers"]) or "none")]
+    plan_path = next((p for p in (os.path.join(path, "plan.md"), os.path.join(path, "1-plan", "plan.md"))
+                      if os.path.exists(p)), None)
+    if plan_path:
+        with open(plan_path, encoding="utf-8", errors="replace") as fh:
+            missing_sections = _missing_plan_sections(fh.read())
+        if missing_sections:
+            lines.append("- Plan: missing %s, which the planner prompt asks for" % ", ".join(
+                "*%s*" % s for s in missing_sections))
     if results:
-        limits = ["stage %s s" % agent_settings.get("stage_timeout_s", AGENT_DEFAULTS["stage_timeout_s"]),
+        limits =["stage %s s" % agent_settings.get("stage_timeout_s", AGENT_DEFAULTS["stage_timeout_s"]),
                   "idle %s s" % agent_settings.get("idle_timeout_s", AGENT_DEFAULTS["idle_timeout_s"])] + limits
     lines += ["- Limits: " + ", ".join(limits), "", "## Speed per stage (from the proxy log)", ""]
     any_estimate = False
@@ -2508,10 +2551,12 @@ def cmd_report(cfg, _args):
 
     lines += ["", "## Judge scores", ""]
     judges = {}
+    scored = {}
     for judge in run.get("judges", []):
         state = _judge_scores(path, judge, key)
         if state["usable"]:
             judges[judge["label"]] = state["data"]
+            scored[judge["label"]] = len(key["builds"]) - len(state["problems"])
             for problem in state["problems"]:
                 lines.append("- `%s`: %s, so it is left out of that build's average." % (judge["label"], problem))
             for note in state["notes"]:
@@ -2543,6 +2588,8 @@ def cmd_report(cfg, _args):
                                                              " | ".join(_cell(v) for v in vals), _cell(total)))
             lines.append("| %s | %s | **average** | | | | | | **%s** |" % (
                 letter, key["builds"][letter], _f(sum(totals) / len(totals)) if totals else "–"))
+        if any(count < len(key["builds"]) for count in scored.values()):
+            lines += ["", "Some judges didn't score every build, so those builds' averages come from fewer judges."]
         if key.get("reviewers"):
             lines += ["", "### Reviews", "",
                       "| Review | Reviewer | Judge | Real issues | False alarms | Missed important | Accuracy | Usefulness |",
@@ -2560,8 +2607,9 @@ def cmd_report(cfg, _args):
         lines += ["", "### Verdicts", ""]
         for judge, data in sorted(judges.items()):
             pref = data.get("preferred_build")
-            lines.append("- **%s** prefers Build %s (%s): %s" % (
-                judge, pref, key["builds"].get(str(pref), "?"), data.get("one_line_verdict") or ""))
+            part = " (scored %d of %d)" % (scored[judge], len(key["builds"])) if scored[judge] < len(key["builds"]) else ""
+            lines.append("- **%s**%s prefers Build %s (%s): %s" % (
+                judge, part, pref, key["builds"].get(str(pref), "?"), data.get("one_line_verdict") or ""))
 
     if results:
         lines += ["", "## Unattended stages", "",

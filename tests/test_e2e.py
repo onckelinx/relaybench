@@ -1082,6 +1082,57 @@ def test_report_warns_from_the_proxy_log_and_counts_the_last_attempt(make_stack)
     assert re.search(r"\| mock-good \| 1 \| 0 \| 0 \| [^|]+ \| 0 \| – \| %s tok/s \|" % re.escape(module._f(expected)), out), out
 
 
+def test_plan_sections_are_checked_against_the_planner_prompt(make_stack):
+    module = load_pipeline_module()
+    assert module._required_plan_sections() == ["Overview", "Files", "Functions", "Error handling", "Test plan",
+                                                 "Build order"]
+    # Shaped like the real plan that left out two sections.
+    real = ("# Plan for `cronnext`\n\n## Overview\nBuild it.\n\n## Files\n- **cronnext/_core.py** – core.\n\n"
+            "## Functions\n### `parse(expr)`\nParses.\n\n## Error handling\n- Raises CronError.\n")
+    assert module._missing_plan_sections(real) == ["Test plan", "Build order"]
+    assert module._missing_plan_sections(real + "\nThere is no test plan or build order here.\n") == \
+        ["Test plan", "Build order"], "words in the text are not sections"
+    bold = "**Overview**\nx\n1. **Files** – x\n**Functions**\n**Error handling**\n2. **Test plan**\n**Build order**\n"
+    assert module._missing_plan_sections(bold) == []
+
+    stack = unattended(make_stack, reviewers=[], judges=[])
+    stack.cli("run", "--allow-sleep")
+    assert "- Plan: missing" not in stack.text_in_run("REPORT.md")
+    plan = os.path.join(stack.run_dir(), "plan.md")
+    os.chmod(plan, 0o644)
+    with open(plan, "w", encoding="utf-8") as fh:
+        fh.write(real)
+    stack.cli("report")
+    assert "- Plan: missing *Test plan*, *Build order*, which the planner prompt asks for" in \
+        stack.text_in_run("REPORT.md")
+
+
+def test_packet_says_how_many_builds_and_partly_scored_judges_are_marked(make_stack):
+    module = load_pipeline_module()
+    assert module._packet_intro(["A"]).startswith("This packet holds 1 build: A. If you can't read all of it")
+    assert module._packet_intro(["A", "B"]).startswith("This packet holds 2 builds: A and B.")
+    assert module._packet_intro(list("ABCDEFGHI")).startswith("This packet holds 9 builds: A to I.")
+
+    stack = unattended(make_stack, reviewers=[], judges=[{"label": "gpt", "type": "paste"},
+                                                         {"label": "claude", "type": "paste"}])
+    out = stack.cli("run", "--allow-sleep")
+    assert re.search(r"Judge packet created: \S+judge-packet\.md \([\d,]+ characters\)", out), out
+    assert "This packet is long" not in out
+    packet = stack.text_in_run("4-judging", "judge-packet.md")
+    assert packet.startswith("# Judge packet\n\nThis packet holds 2 builds: A and B. If you can't read all of it")
+
+    paste_answer(stack, "gpt", 4)
+    only_a = {"A": {c: 3 for c in ("correctness", "plan_adherence", "code_quality", "edge_cases", "own_tests")}}
+    with open(os.path.join(stack.run_dir(), "4-judging", "scores-claude.md"), "a", encoding="utf-8") as fh:
+        fh.write("I could only read Build A.\n\n```json\n%s\n```\n" % json.dumps(
+            {"builds": only_a, "reviews": {}, "preferred_build": "A", "one_line_verdict": "From claude."}))
+    stack.cli("report")
+    report = stack.text_in_run("REPORT.md")
+    assert "- **claude** (scored 1 of 2) prefers Build A" in report
+    assert "- **gpt** prefers Build A" in report
+    assert "Some judges didn't score every build, so those builds' averages come from fewer judges." in report
+
+
 def datetime_of(text):
     return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%S"))
 
