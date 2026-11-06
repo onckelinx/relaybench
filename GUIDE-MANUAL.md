@@ -335,6 +335,8 @@ numbered code, and then every review, labelled only by letter. Then, for each ju
   drop the formatting, and copying only the JSON block leaves out the reasoning. If the answer is in
   a canvas or a file, ask for it directly in the chat. If its format is off, ask:
   `Rewrite your answer in exactly the format under "Required output" in the scoring sheet.`
+  Check that it scores every build: some chats read only the start of a long packet. `packet` prints the
+  packet's size, and the packet asks judges to name any builds they couldn't read.
 - **`human` judges:** read the packet and fill in `4-judging/scores-<label>.md`, replacing every
   `null`. Ideally this is someone who didn't run the stages.
 
@@ -352,7 +354,8 @@ python pipeline.py report
 
 `runs/<run-id>/REPORT.md` shows your hardware and quantisation where the system says, speed per stage, the
 settings sent to the model, hidden and own test results, scores per judge with averages, integrity flags,
-and the blind key. Fill in **My notes**, including your power setup and agent settings, and anything the
+and the blind key. Below the speed table, it warns about a prompt cut to a fixed size (usually at the context
+limit) and a model that repeated itself. At the top, it names any plan section the planner left out. Fill in **My notes**, including your power setup and agent settings, and anything the
 report lists as `not reported`, then run `report` again. It keeps your notes and updates the copy in
 `results/`. Reports name your models, so `results/` is ignored by Git. Commit them only if you want to.
 
@@ -364,10 +367,12 @@ report lists as `not reported`, then run `report` again. It keeps your notes and
 stay in `runs/` until you delete them.
 
 **Compare runs.** `python pipeline.py compare` shows each model's tests, judge totals and speed across finished
-runs. Runs with a different task version, prompts, scoring sheet or agent go in separate tables.
+runs. Runs with a different task version, prompts, scoring sheet, agent, pinned settings, server or context length
+go in separate tables. [CHANGELOG.md](CHANGELOG.md) says which versions of relaybench changed a hash.
 
 **Redo one stage.** `python pipeline.py start <stage>`, for example `start build-<label>`. `status`
-and the error message list stage names. The report counts how often each stage was started.
+and the error message list stage names. The report counts how often each stage was started, and its speed
+table counts only the last attempt.
 
 **Redo all builds or the anonymisation.** `freeze --force` or `blind --force`. Old results that
 depended on them are moved to a `_stale-<time>` folder in the run, because old scores would otherwise

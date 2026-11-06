@@ -146,6 +146,7 @@ the rest of the run carries on.
 | `run [--task name] [--repeat n] [--allow-sleep]` | Does all of the above unattended, or resumes an unfinished run. `--repeat` does several runs in a row. |
 | `compare [--task name]` | Compares finished runs per model: tests, judge totals and speed, across runs |
 | `skip ["note"] [--force]` | During `run`: stops the active model, keeps what it built, and moves on |
+| `retry <stage>` | Runs a failed stage again with the next `run`, even after the report |
 | `add-judge` | Adds a judge to a run that has already started, and creates its score file |
 | `cross-check` | Optional: makes a packet for judges to check each other's reports, as notes that are never scored |
 | `start <stage>` | (Re)starts one stage |
@@ -246,6 +247,7 @@ agent's commands are not sandboxed. Use a container or VM if that matters to you
 | [`GUIDE-MANUAL.md`](GUIDE-MANUAL.md) | Full walkthrough of a manual run |
 | [`GUIDE-UNATTENDED.md`](GUIDE-UNATTENDED.md) | Full walkthrough of an unattended run |
 | [`METHODOLOGY.md`](METHODOLOGY.md) | Why it works this way, and known limitations and biases |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed, and which changes stop results from comparing with older runs |
 
 ## How this was made
 

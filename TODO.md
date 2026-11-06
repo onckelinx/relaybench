@@ -2,46 +2,8 @@
 
 Ideas for later, in no particular order. What to work on first gets decided when we get to it.
 
-Most of these came from a big unattended `cron-next` run. "That run" means this one.
-
-## Rerun a failed build in a finished run
-
-`python pipeline.py retry <stage>`
-
-In that run, a model wrote 12 tokens on its first call, and nothing more came through. Cline gave up after about
-6 minutes of silence, so the build failed before any work was done. `run` can't redo it, because it skips failed
-stages, and it starts a new run once a report exists.
-
-Today this takes a hand-written script, which worked on a mock run. The command should do the same:
-
-- Refuse if a `run` is going, or if the stage isn't marked as failed.
-- Set aside `tests`, `blind-key.json`, `4-judging`, `REPORT.md` and any `3-review-*` folders.
-- Remove the stage's failed entry from `stage-results.json`, so that `run` resumes this run and builds it.
-- Keep what's under *My notes* in the report.
-- Warn that build letters get reshuffled, so any judges' answers need redoing.
-
-**Tests:** with and without reviewers, a second failure, and both refusals.
-
-## Count only the last attempt in a stage's speed
-
-`cmd_report` uses all of a stage's calls for generation speed, model time and wall time, including those from a
-failed attempt. A rerun stage would then look slower than it was: a stalled call adds minutes of generating time
-with almost no tokens, and wall time includes the gap until the rerun. `compare` has the same problem with speed.
-
-`stage-history.jsonl` records when each attempt started, so calls can be limited to the last one. Keep showing
-the number of attempts.
-
-## Spot leftovers outside the build folder
-
-In that run, one builder created `/tmp/cronnext-venv` and another wrote `/tmp/patch.py`, even though `build.md` says
-to stay in the build's folder. The integrity check doesn't look at `/tmp`, so the report flagged neither. The first
-builder removed its folder before it ended, but a leftover like this could show a later model part of a build.
-
-- Compare `/tmp` before and after each stage, and flag new entries in the report.
-- Think hard before deleting anything automatically, because `/tmp` also holds other programs' files.
-- Setting `TMPDIR` for each stage isn't enough, because this model typed `/tmp` itself.
-
-Only a container really prevents this. See [Using a container](GUIDE-UNATTENDED.md#using-a-container).
+Most of these came from a big unattended `cron-next` run. "That run" means this one. Entries that change a task,
+prompts or scoring hash wait until the planned mlx-serve runs are done, so those runs compare with that run.
 
 ## Use a neutral run path
 
@@ -98,7 +60,8 @@ the group's average or the published benchmarks they cite.
 What that first round showed:
 
 - **Ratings need a meaning set in advance.** ✅, ⚠️ and ❌ weren't defined, so they can't be scored fairly. Fix them
-  before results exist, for example ✅ = not stopped and at least 85% of tests.
+  before results exist. A rule like "✅ = not stopped and at least 85% of tests" would have rated that run's winner
+  ⚠️, because it was stopped one command short of committing, so stopped builds need thought.
 - **Ask for numbers too.** Most models got mostly ✅ or mostly ⚠️. Ask for a test count, a rank and the chance of
   finishing without being stopped.
 - **Use a fixed answer format.** One judge merged the two GLM quantisations into one row. A JSON block with one entry
@@ -106,28 +69,25 @@ What that first round showed:
 - **Split the question about judges.** Asked how well judges would "predict", some answered about predicting before
   the run and others about auditing code afterwards, so those scores don't compare.
 - **Track conflicts of interest.** Models are named here, and judges rated their own makers' models. For example,
-  the only ✅ for Gemma came from Gemini. Report those rows separately.
+  the only ✅ for Gemma came from Gemini, and was right. Report those rows separately.
 - **Keep it apart from judging.** Use new chats with memory off. Judges with web search could also find this public
   repo's earlier reports.
 
-## Handle plans that skip or contradict the task
+## Tell builders that `TASK.md` wins over the plan
 
-The plan in that run left out two of the six sections `prompts/plan.md` requires, and contradicted `TASK.md` in one
-rule. It also suggested a minute-by-minute search that can't meet the task's time limit. A reference solution
-changed to use that search fails 5 of the 100 hidden tests, and using the wrong rule instead fails 1.
+The plan in that run contradicted `TASK.md` in one rule, and suggested a minute-by-minute search that can't meet the
+task's time limit. A reference solution changed to use that search fails 5 of the 100 hidden tests, and using the
+wrong rule instead fails 1. All five builds that kept the minute search scored 94 or less, and the four that
+replaced it scored 96 or more.
 
-- Flag missing plan sections in the report. `_settle_stage` only checks that `plan.md` exists and isn't empty.
-- Tell builders that `TASK.md` wins when the plan disagrees. `prompts/build.md` says "Implement exactly what they
-  describe" and has no rule for this. This changes the prompts hash, so later runs get their own table in `compare`.
+`prompts/build.md` says "Implement exactly what they describe" and has no rule for a disagreement. Adding one changes
+the prompts hash, so later runs get their own table in `compare`. The report already names missing plan sections.
 
 ## Fix `cron-next` test problems
 
 - **A weak test:** `test_star_step_day_of_month_is_unrestricted_so_and` passes by luck with the wrong rule, because
   from 2 September the next Monday is the 9th, which is odd anyway. Start from 9 September, where the right answer
   is the 23rd and the wrong rule gives the 16th. Add a failing variant to `tests/fixtures/cron-next/variants.json`.
-  This changes the task hash, so wait until no `cron-next` run is going.
-- **Grouping:** one slow search shows as three *Failing areas*. In `tasks/cron-next/test_groups.json`, move
-  `test_next_n_never_fires` and `test_cli_no_match` to *schedules that end*. This doesn't change the task hash.
 - **Missing tests:** judges reported five bugs that the hidden tests can't see. With each one added to a copy of the
   reference solution, it still passed 100 of 100. Add a test and a failing variant for each:
   - `5/1 * * * *` must give the minutes 5 to 59.
@@ -136,21 +96,9 @@ changed to use that search fails 5 of the 100 hidden tests, and using the wrong 
   - `parse()` must raise `CronError` when given a schedule object.
   - `--from 2024-01-15` and `--from "2024-01-15 07:00:00"` must exit with code 2.
 
-  Checks on that run's builds found all five, and only the top build has none of them. This changes the task hash and
-  the test count, so do it together with the weak test. Later runs then get their own table in `compare`.
+  Checks on that run's builds found all five, and only the top build has none of them.
 
-## Flag judges who read only part of the packet
-
-The packet in that run was about 292,000 characters, and some chats cut it. Grok scored only the first three and the
-last two of nine builds, and its answer says about 118,000 characters were cut, which fits the gap. Perplexity scored
-only the first three. The harness doesn't shorten anything, so this happened in the chats. Leaving them out of those averages didn't change the order, but the report still lists Perplexity's
-"prefers Build B" with no sign that it saw 3 of 9.
-
-- In *Verdicts*, show how many builds each judge scored, for example `(scored 3 of 9)`.
-- Say in the report when the builds' averages use different judges.
-- Print the packet's size when it's made, and tell people in the guides to check that an answer covers every build.
-- Ask judges to name any build they couldn't read, and try smaller packets. Put new instructions in `cmd_packet`,
-  because changing `scoring/` changes the scoring hash.
+Both change the task hash and the test count, so do them together, and after the mlx-serve runs.
 
 ## Tell judges when a build was stopped or didn't commit
 
@@ -166,35 +114,24 @@ didn't commit either.
 - Decide first how judges should weigh this, because it could make them harsher on code that works. A scoring rule
   for it would change the scoring hash.
 
-## Flag builds that hit the context limit
+## Find out who cuts long prompts, and what's lost
 
-The proxy log shows this, but the report doesn't. Three builds reached about 65,000 tokens of input, against a limit
-of 65,536. Input then dropped to about 31,300 and stayed at one exact count for every later call. Each of those calls
-took about 35 s to its first token, instead of a few seconds. That cost `qwen3.8-27b-uncensored-mlx` 17.6 minutes and
-`glm-4.7-flash` about 12 in that run, and `devstral-small-2507-mlx` 17.3 in the toy run. One long answer can use much of
-the limit: a 22,183-token planning answer stayed in the history and took about a third of it.
+The report now warns when a prompt is cut to a fixed size. In that run, three builds reached about 65,000 tokens of
+input against a limit of 65,536, then stayed at about 31,300 for every later call, each waiting about 35 s for a first
+token. It isn't known yet whether LM Studio or the agent does the cutting, or what the model loses.
 
-- **Report:** add a note to the stage, with the call number and the minutes lost.
-- **`compare`:** add context length to the grouping in `cmd_compare`. It currently mixes runs with different context
-  lengths in one table.
-- **Proxy:** log each request's size, so it can be compared with the server's count. Use that to find out whether
-  LM Studio or the agent cuts the prompt, and what gets cut.
+- The proxy now logs each request's size. On the next run that reaches the limit, set it against the server's input
+  tokens: a request that keeps growing while the input stays fixed means the server cuts.
+- If the cut loses the task or the plan, a model may redo work it already did. Look for that in the agent logs.
+- Decide on a context length for later runs. A larger one avoids the cut, but changes what's measured, and
+  `compare` keeps runs with a different context length apart.
 
-## Flag or stop a model that repeats itself
+## Decide whether to stop a looping model automatically
 
-In that run, `glm-4.7-flash` alternated between answers of 147 and 561 tokens from call 46, at minute 10.7 of 31.6,
-until it was stopped by hand. In the toy run, `devstral-small-2507-mlx` repeated a five-call cycle from call 38, at
-minute 12.7 of 60. Both loops started before those builds hit the context limit. No other stage in the three runs in
-the log matched, so exact repeats of answer sizes look like a usable signal.
-
-- Flag it in the report first, with the call and minute where it started.
-- Decide later whether it should also stop the model automatically. Here that could have saved about 21 and 47 minutes.
-
-## Keep a changelog
-
-Add a `CHANGELOG.md`, starting with `v0.1.0` and what has changed since. For each version, say which changes affect
-results, meaning anything that changes the task, prompts or scoring hash, so readers can tell which results still
-compare. Update it with each change from now on.
+The report now flags a model whose answer sizes repeat in a cycle. In that run, `glm-4.7-flash` looped from minute
+10.7 of 31.6 until it was stopped by hand, and in the toy run `devstral-small-2507-mlx` looped from minute 12.7 of 60.
+Stopping automatically could have saved about 21 and 47 minutes. But it's a decision for the harness to make instead
+of a person, so it needs a threshold that can't stop a model doing real work. Two real loops are not much to set one.
 
 ## Smaller ideas and open offers
 
@@ -204,5 +141,6 @@ compare. Update it with each change from now on.
   really saves.
 - Decide whether to force-push to remove the hardware line that commit `b009b6f` left in the history. The
   recommendation so far is to leave it.
-- Add cached tokens to the report, once real server data shows what servers send.
+- Add cached tokens to the report. The proxy now logs them where the server reports them, so first see what real
+  servers send.
 - Tag a new version after a real run has exercised the latest changes.

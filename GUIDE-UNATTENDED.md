@@ -232,6 +232,9 @@ already included. If you have `paste` or `human` judges, it lists them as still 
 2. Attach `4-judging/judge-packet.md` from the run's folder, and send `Follow the instructions in this file.`
 3. Copy the **complete** answer with the chat's copy button, and paste it into
    `4-judging/scores-<label>.md`, below the first line. Copying only the JSON leaves out the reasoning.
+4. Check that the answer scores every build. In one real run, two chats read only the start of a long packet,
+   and scored only the builds they saw. Creating the packet prints its size and warns when it's long, and the
+   packet asks judges to name any builds they couldn't read.
 
 `run` creates that score file when it makes the packet, after all the reviews, so `4-judging` doesn't exist
 before then.
@@ -267,13 +270,20 @@ python pipeline.py report
 **Check** these in `runs/<run-id>/REPORT.md`:
 
 - **Unattended stages:** every stage should say `done`, with model calls above zero. The *Notes* column
-  shows anything that went wrong. See [When a stage goes wrong](#when-a-stage-goes-wrong).
-- **Attempts:** above 1 means a stage restarted after an interruption, so treat its numbers with care.
+  shows anything that went wrong, including anything new in `/tmp` while the stage ran. See
+  [When a stage goes wrong](#when-a-stage-goes-wrong).
+- **Attempts:** above 1 means a stage was started again, after an interruption or a `retry`. Its row in the
+  speed table counts only the last attempt.
+- **Warnings from the proxy log:** these appear below the speed table. One is a prompt cut to a fixed size,
+  which in a real run happened near the context limit, after which each call waited about half a minute. The
+  other is a model whose answers repeat in a cycle, which usually means it's looping.
+- **Plan:** a line at the top names any section that the planner prompt asks for and the plan left out.
 - **Hidden tests:** the *Own tests* column shows what happened when the harness ran each build's own tests.
   Judges see this too. `none found` means pytest found no tests in that build. **(stopped)** means the agent
   was stopped before it finished, so the score only shows its code at that moment. *Failing areas* show when
   several failures come from one part of the task, which may be one mistake.
 - **Integrity flags:** whether a model may have seen something it shouldn't have.
+- **Verdicts:** `(scored 3 of 9)` marks a judge that left builds out. It still counts for the builds it scored.
 - **The top of the report:** hardware, agent version and quantisation are filled in where the system says.
   `not reported` means it couldn't tell, so add those under *My notes*.
 - **My notes:** add your hardware, power setup and agent version, then run `python pipeline.py report`
@@ -334,7 +344,8 @@ python pipeline.py compare --task toy-bepay
 
 For each model, this shows the runs, failed and stopped builds, hidden tests passed, judge totals and speed, and saves
 the table in `results/`. A failed build counts as 0 tests passed. Runs with a different task version, prompts,
-scoring sheet, agent or pinned settings go in separate tables, because their results don't compare.
+scoring sheet, agent, pinned settings, server or context length go in separate tables, because their results
+don't compare. See [CHANGELOG.md](CHANGELOG.md) for which versions of relaybench changed a hash.
 
 - **Judges:** with `paste` judges, each run waits for two more chats from you, so judging many runs by hand
   is a lot of copying. `api` judges suit this better. Without judges, you still get tests and speed for every
@@ -351,7 +362,7 @@ scoring sheet, agent or pinned settings go in separate tables, because their res
 
 ## When a stage goes wrong
 
-Nothing is retried, because that would give one model a chance the others didn't get.
+`run` never retries a stage by itself, because that would give one model a chance the others didn't get.
 
 | What happened | What `run` does |
 |---|---|
@@ -367,6 +378,20 @@ Nothing is retried, because that would give one model a chance the others didn't
 | You run `skip` | That stage stops and the run moves on. See [If a model gets stuck](#if-a-model-gets-stuck). |
 
 Each stage's agent output is in `agent-logs/` in the run's folder, which is the first place to look.
+
+**A one-off failure?** If a stage failed for a reason outside the model, such as a stalled server, you can
+give it another go. This works after the report too:
+
+```bash
+python pipeline.py retry build-<label>
+python pipeline.py run
+```
+
+`retry` refuses while a run is going, and for a stage that didn't fail. The builds get new letters, so it sets
+aside the tests, anonymisation, reviews, judge files and report in a `_stale-<time>` folder, and every review
+runs again. Any judges' answers from before need redoing. It keeps *My notes*. The report's *Attempts* column
+shows the second try, and the speed table counts only that try. Say why you retried under *My notes*,
+because the other models didn't get a second chance.
 
 The exit code is 0 when the report is written, even if some stages failed, so always read the report. It
 is 1 if the plan or every build failed or an `api` judge failed, and 130 if the run was stopped.
@@ -390,6 +415,8 @@ Judges don't see the note.
 - The note is optional.
 - `skip` needs someone awake. Overnight, `stage_timeout_s` is the limit, so lower it if time matters. A cap on
   `max_tokens` also helps with a single answer that never ends. See [Pinning model settings](#pinning-model-settings).
+- Afterwards, the report shows a model that repeated itself, below the speed table, with the call and minute
+  it started. In a real run, one model looped for 20 minutes before it was stopped by hand.
 
 ## If a run is interrupted
 
@@ -553,4 +580,7 @@ powercfg /change hibernate-timeout-ac 0
 | A score file isn't counted | Every build needs all five scores from 1 to 5 in a JSON block with a `builds` key. Compare with the scoring sheet in the packet. If the report says it belongs to no judge, add that judge with `python pipeline.py add-judge`. |
 | You left a judge out at `init`, or want another one | Use `python pipeline.py add-judge`, at any point in a run or after its report. Add `--run <id>` for an earlier run. |
 | A model is stuck in a loop | See [If a model gets stuck](#if-a-model-gets-stuck). |
+| A stage failed for a reason outside the model | Use `python pipeline.py retry <stage>`, then `run`. See [When a stage goes wrong](#when-a-stage-goes-wrong). |
+| A judge scored only some builds | Its chat probably read only part of the packet. Try again in a new chat, or keep it: the report marks it `(scored k of n)`, and it counts only for the builds it scored. |
+| The report warns that a prompt was cut | The input reached the context limit, and every later call waited longer. Raise `backend.context_length`, and the agent's context window to match, for the next run. |
 | Something else | More answers are in the [manual guide's troubleshooting](GUIDE-MANUAL.md#troubleshooting). |

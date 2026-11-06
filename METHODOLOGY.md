@@ -132,8 +132,10 @@ every model, independent of the agent's own display. For each model call it reco
 | Generation speed | Output tokens divided by the time from first token to the end |
 | Model time | Time spent waiting for the model |
 | Wall time | First to last model call in a stage, so it includes tools, approvals and any gap between restarts |
-| Attempts | How often the stage was started. A stage that needed restarts is a finding, not noise. |
+| Attempts | How often the stage was started. A stage that needed restarts is a finding, not noise. Its speed and times count only the last attempt, so a stalled earlier try doesn't distort them. |
 | Temperature, max tokens | What was sent to the model, per stage: the agent's values, or `request_overrides` if you pinned them |
+| Request size | Bytes and messages the agent sent, logged per call. Set against the server's input tokens, it shows whether the agent or the server shortened a long prompt. |
+| Cached tokens | Prompt tokens the server says it reused, logged per call where the server reports them. Not in the report yet. |
 
 The proxy changes requests in as few ways as possible. It adds `stream_options.include_usage` so
 token counts come from the server, rewrites the model name on servers without a load step, and applies
@@ -142,6 +144,17 @@ should not be compared across servers.
 
 Calls that were cancelled still count: a model that loops until you stop it is logged with what it
 produced.
+
+The report warns about two patterns in a stage's calls:
+
+- **A cut prompt:** input falls by more than 30% and then stays at one exact size for 3 calls or more. A
+  growing conversation can't do that by itself, so something shortened the prompt. In a real run this
+  happened near LM Studio's context limit, to about 31,000 of 65,536 tokens. Every later call reprocessed the
+  whole prompt and waited about 35 s for a first token, which cost one build 17.6 minutes.
+- **A loop:** answer sizes repeat in a cycle of 1 to 6 calls, at least 4 times and over at least 8 calls. Two
+  real loops matched this, and none of the other builds in three runs did.
+
+Both are best-effort, and they warn without changing any score.
 
 ## Controlled variables
 
@@ -175,16 +188,18 @@ same auto-approve settings for every stage.
 and nobody fixes the plan, so every model gets the same treatment. That also means a bad plan goes
 straight to every builder. The agent is now a bigger part of what you measure: a command-line agent can
 behave differently from an editor one, even from the same project, so don't compare scores across agents
-or modes. There are no retries, because a retry would give one model a chance the others didn't get.
-A restart after an interruption continues from the files already there, and the report's *Attempts*
-column shows it. Treat such a stage's numbers with care.
+or modes. `run` never retries by itself, because a retry would give one model a chance the others didn't
+get. A restart after an interruption continues from the files already there, and so does a `retry` you
+ask for after a failure outside the model. The report's *Attempts* column shows both, and the operator
+should say why under *My notes*.
 
 ## Known limitations and biases
 
 **Sample size and chance.** Models are nondeterministic, and one run is one sample. A difference of
 a few tests or points in a single run may be chance. Repeat runs before you believe a small gap, and
 don't treat a report as a ranking. `run --repeat` and `compare` show the mean and spread across runs,
-and keep runs with different tasks, prompts, scoring or agents apart. They don't test for significance.
+and keep runs with different tasks, prompts, scoring, agents, pinned settings, servers or context lengths
+apart. They don't test for significance.
 
 **Stopping a model by hand is a human decision.** `skip` ends a stage early, and a person chooses which
 stage and when. A stopped build is scored on what it had at that moment, the same as a build that reached the
@@ -208,8 +223,10 @@ including `tasks/*/hidden_tests`, `blind-key.json`, sibling builds and `tests/fi
 tell it to stay in its folder, but nothing enforces that. As a best-effort check, the proxy searches
 every request for strings like `hidden_tests`, `blind-key` and other builders' folders and names, and
 flags hits in the report. It can miss things (a model that reads a file and never repeats it in a
-form the agent sends back) and can false-alarm (a task or a project that uses those words). For
-stronger isolation, set `runs_dir` outside this repo and run agents in a container or VM.
+form the agent sends back) and can false-alarm (a task or a project that uses those words). During
+each unattended stage, the harness also lists new entries at the top level of `/tmp`, because in a real
+run one builder made a virtual environment there. That list can include other programs' files, and it
+deletes nothing. For stronger isolation, set `runs_dir` outside this repo and run agents in a container or VM.
 
 **Blinding is imperfect.**
 
@@ -235,7 +252,10 @@ stronger isolation, set `runs_dir` outside this repo and run agents in a contain
 - Judges see each build's own test results, run by the harness. Passing tests can still be trivial, so
   this is evidence about the tests, not a score.
 - The scoring scales are subjective, and the average of a few judges isn't a precise instrument.
-- Very large packets may not fit a judge's context, and it may not say so.
+- Very large packets may not fit a judge's chat, and it may not say so. In a real run, two chats read only
+  the start of a 290,000-character packet. The packet now opens by saying how many builds it holds, and
+  asks judges to name any they couldn't read. The report marks a judge who scored only some builds, and
+  that judge counts only for those.
 
 **Speed numbers depend on setup.**
 
